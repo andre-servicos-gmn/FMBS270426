@@ -1,0 +1,46 @@
+# ── Secrets ──────────────────────────────────────────────────────────────
+# NEVER commit the real .env. The committed file is .env.example with empty
+# values and inline documentation.
+.env
+.env.*
+!.env.example
+*.env
+
+# ── Python ───────────────────────────────────────────────────────────────
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# ── Bling debug dumps ────────────────────────────────────────────────────
+# scripts/bling_initial_sync.py --debug-first writes these. They contain
+# raw Bling API responses (third-party AWS presigned URLs, product data,
+# SKU codes). NEVER commit. The pattern below catches every future dump.
+debug_raw_payload_*.json
+*.dump
+
+# ── Editor / OS / local config ───────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.log
+*.swp
+*.swo
+
+# Claude Code local permissions — by convention this stays out of vcs.
+.claude/settings.local.json
+.claude/
+
+# MCP server local config — contains identifying project refs that aren't
+# strictly secret but don't belong in a public repo.
+.mcp.json
+
+# Local backups
+*-backup-*/
+backup_*/

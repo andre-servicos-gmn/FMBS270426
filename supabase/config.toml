@@ -1,0 +1,3 @@
+[project]
+# Fill in with your Supabase project ref (found in Project Settings → General)
+project_id = "your-project-ref"

@@ -1,0 +1,30 @@
+{
+  "_comment_for_humans": "Synthesized Bling V3 /produtos/{id} response matching the reported Mormaii Sunset Plus product. Use this as a regression fixture for the Sprint 2.5.2 parser. Replace with Andre's real captured JSON when available.",
+  "data": {
+    "id": 18472103881,
+    "nome": "Raquete Beach Tennis Mormaii Sunset Plus Carbono 3k",
+    "codigo": "MOR-SUN-PLUS-3K",
+    "tipo": "P",
+    "situacao": "A",
+    "formato": "S",
+    "preco": 899.0,
+    "estoque": {"minimo": 0, "maximo": 0},
+    "descricaoCurta": "Raquete top de linha da Mormaii.",
+    "descricaoComplementar": "<p style=\"font-family: Tailwind\"><strong>Características técnicas:</strong></p><p>- Perfil: Avançado;</p><p>- Composição: Quadro: Carbono. Superfície: Carbono 3K. EVA: Soft;</p><p>- Detalhamento: Superfície áspera, contém 30 furos;</p><p>- Comprimento: 50cm;</p>",
+    "categoria": {"id": 14821094},
+    "marca": "Mormaii",
+    "midia": {"imagens": {"externas": []}},
+    "pesoLiquido": 0.350,
+    "pesoBruto": 0.420,
+    "dimensoes": {"largura": 28, "altura": 50, "profundidade": 4},
+    "gtin": "7891234567890",
+    "camposCustomizados": [
+      {"idCampoCustomizado": 7001, "valor": "Mormaii"},
+      {"idCampoCustomizado": 7002, "valor": "Sunset Plus"},
+      {"idCampoCustomizado": 7003, "valor": "Ativado"},
+      {"idCampoCustomizado": 7004, "valor": "Carbono 3K"},
+      {"idCampoCustomizado": 7005, "valor": "Soft EVA"},
+      {"idCampoCustomizado": 7006, "valor": "22mm"}
+    ]
+  }
+}

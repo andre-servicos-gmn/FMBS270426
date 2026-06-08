@@ -37,6 +37,35 @@ def is_reset_command(text: str) -> bool:
     return text.strip().lower() == _RESET_TRIGGER
 
 
+def is_reset_authorized(raw_phone: str) -> bool:
+    """Sprint 2.7 — gate ``/reset`` by phone allowlist.
+
+    Reads ``RESET_ALLOWED_PHONES`` (comma-separated, no spaces required) from
+    settings and returns True iff ``raw_phone`` is in the list. Phone numbers
+    are compared as digits-only strings, so cosmetic differences (whitespace,
+    dashes, leading "+") in the env var don't break the match.
+
+    Empty allowlist → ALWAYS False. This is the safe production default:
+    `/reset` is fully disabled unless an operator explicitly enables it for
+    specific numbers.
+    """
+    if not raw_phone:
+        return False
+    from app.config import get_settings
+    allowed_raw = (get_settings().reset_allowed_phones or "").strip()
+    if not allowed_raw:
+        return False
+
+    target = "".join(ch for ch in raw_phone if ch.isdigit())
+    if not target:
+        return False
+    for entry in allowed_raw.split(","):
+        digits = "".join(ch for ch in entry if ch.isdigit())
+        if digits and digits == target:
+            return True
+    return False
+
+
 async def reset_conversation(phone_hash: str) -> int:
     """Delete every Redis key referencing ``phone_hash``. Returns count removed.
 

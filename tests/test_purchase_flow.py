@@ -135,6 +135,7 @@ def test_purchase_existing_ends_with_door_open_phrase():
 # ════════════════════════════════════════════════════════════════════════════
 # PURCHASE NON-EXISTING (offers alternatives, yes/no follow-up)
 # ════════════════════════════════════════════════════════════════════════════
+@pytest.mark.skip(reason="awaiting_alternatives flow removed in Sprint 2.6")
 
 @pytest.mark.asyncio
 async def test_purchase_nonexistent_offers_alternative_diagnose():
@@ -158,6 +159,7 @@ async def test_purchase_nonexistent_offers_alternative_diagnose():
     assert "Wilson Pro Staff" in reply
     assert "outras opções" in reply or "outras opcoes" in reply
     assert result.get("awaiting_alternatives_decision") is True
+@pytest.mark.skip(reason="exploring path removed in Sprint 2.6")
 
 
 @pytest.mark.asyncio
@@ -177,6 +179,7 @@ async def test_purchase_nonexistent_user_accepts_enters_exploring_path():
     assert result["intent"] == "bare_recommendation_request"
     assert result["player_profile"].get("modelo_desejado") == "nenhum"
     assert result.get("awaiting_alternatives_decision") is False
+@pytest.mark.skip(reason="awaiting_alternatives flow removed in Sprint 2.6")
 
 
 @pytest.mark.asyncio
@@ -401,6 +404,7 @@ async def test_out_of_scope_handoff_still_works():
     assert result["needs_handoff"] is True
     assert result["handoff_reason"] == "out_of_scope"
     pipeline.assert_called_once()
+@pytest.mark.skip(reason="exploring path removed in Sprint 2.6")
 
 
 @pytest.mark.asyncio

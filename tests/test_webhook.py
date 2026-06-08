@@ -136,8 +136,10 @@ async def test_webhook_accepts_when_no_token_configured(no_token, fake_redis, ca
 
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
+    # Sprint 2.7 renamed the log key to `webhook_auth_disabled` (snake_case
+    # for grepability), aligned with `webhook_auth_ok` / `webhook_auth_failed`.
     assert any(
-        "webhook auth DISABLED" in rec.message and rec.levelname == "WARNING"
+        "webhook_auth_disabled" in rec.message and rec.levelname == "WARNING"
         for rec in caplog.records
     ), "expected structured warning to be emitted on every bypass"
 

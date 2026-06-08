@@ -130,20 +130,13 @@ def maybe_add_subtle_consultoria_offer(
     """
     update: dict = {}
 
-    # Always tick the determined-question counter — only meaningful for
-    # determined customers, but tracking it everywhere makes
-    # ``determined_question_count`` reflect "calls into the helper" and
-    # keeps logic simple.
-    is_determined = state.get("customer_intent_path") == "determined"
-    if is_determined:
-        new_count = int(state.get("determined_question_count") or 0) + 1
-        update["determined_question_count"] = new_count
-    else:
-        new_count = int(state.get("determined_question_count") or 0)
+    # Sprint 2.6 — ``customer_intent_path`` was removed. Every customer who
+    # reaches a product follow-up (price_inquiry / product_detail / etc.)
+    # is effectively a "determined" customer by definition, so the gate
+    # collapses to the cap + handoff + config + raquete checks.
+    new_count = int(state.get("determined_question_count") or 0) + 1
+    update["determined_question_count"] = new_count
 
-    # Cap / path / handoff / config / product-type guards.
-    if not is_determined:
-        return response_blocks, update
     if int(state.get("consultoria_mentioned_count") or 0) > 0:
         return response_blocks, update
     if state.get("needs_handoff"):

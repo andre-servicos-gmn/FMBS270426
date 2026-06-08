@@ -53,19 +53,20 @@ def _row_to_dict(p: BlingProduct) -> dict[str, Any]:
     }
 
 
-async def list_active_products(limit: int = 200) -> list[dict[str, Any]]:
-    """Return every active product as plain dicts (cap at ``limit``).
+async def list_active_products(limit: int | None = None) -> list[dict[str, Any]]:
+    """Return every active product as plain dicts.
 
-    Used by the agent's match layer instead of the legacy semantic search
-    when Bling integration is live. For thousands of products you'd want a
-    real search index; in the pilot (~1240 products) a single SELECT is fast.
+    Sprint 2.6.3 — default is now NO limit. The previous default of 200
+    silently truncated the catalog to ~16% in pilot (1241 active products)
+    so the match layer never saw the long tail. Callers that DO want a
+    cap can still pass one; production sync flows use ``None`` and rely
+    on the in-memory cache to amortize the load cost.
     """
     async with get_session() as session:
-        result = await session.execute(
-            select(BlingProduct)
-            .where(BlingProduct.situacao == "A")
-            .limit(limit)
-        )
+        stmt = select(BlingProduct).where(BlingProduct.situacao == "A")
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        result = await session.execute(stmt)
         rows = result.scalars().all()
     return [_row_to_dict(p) for p in rows]
 

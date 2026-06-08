@@ -115,7 +115,7 @@ async def product_detail_node(state: AgentState) -> dict:
         else:
             blocks = [
                 f"Sobre a *{name}* eu não tenho um descritivo completo aqui. "
-                "Vale conferir direto na loja ou na *Consultoria Base Esportes*."
+                "Vale conferir direto na loja ou na *Consultoria Base Sports*."
             ]
         logger.info("product_detail vague target=%s", name)
     else:
@@ -137,13 +137,13 @@ async def product_detail_node(state: AgentState) -> dict:
         if value_part:
             blocks = [
                 f"*{name}* — {value_part}.",
-                "_Vale conferir mais detalhes em quadra na Consultoria Base Esportes._",
+                "_Vale conferir mais detalhes em quadra na Consultoria Base Sports._",
             ]
             logger.info("product_detail answered target=%s attr=%s", name, label)
         else:
             blocks = [
                 f"Sobre o {label} da *{name}* eu não tenho esse detalhe específico aqui.",
-                "Vale conferir direto na loja ou na *Consultoria Base Esportes*, que aprofunda essas características pra ti.",
+                "Vale conferir direto na loja ou na *Consultoria Base Sports*, que aprofunda essas características pra ti.",
             ]
             logger.info("product_detail missing target=%s attr=%s", name, label)
 

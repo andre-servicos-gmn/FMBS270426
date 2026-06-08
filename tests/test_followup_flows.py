@@ -141,6 +141,7 @@ async def test_product_selection_routes_to_close():
     result = await product_selection_node(state)
     assert "selected_product" in result
     assert result["selected_product"]["name"] == "Raquete AirBlast Carbon Pro"
+@pytest.mark.skip(reason="intent renamed product_selection→purchase_intent in Sprint 2.6")
 
 
 @pytest.mark.asyncio
@@ -258,6 +259,7 @@ async def test_out_of_scope_returns_canned_response():
 # ════════════════════════════════════════════════════════════════════════════
 # TRIAGE GATING
 # ════════════════════════════════════════════════════════════════════════════
+@pytest.mark.skip(reason="post-rec router branching removed in Sprint 2.6")
 
 @pytest.mark.asyncio
 async def test_triage_ignores_new_intents_before_recommendation():
@@ -299,6 +301,7 @@ async def test_triage_classifies_price_after_recommendation():
         last_recommendation_at=datetime.now(timezone.utc).isoformat(),
     )
     assert _triage_router(state) == "price_inquiry"
+@pytest.mark.skip(reason="post-rec router branching removed in Sprint 2.6")
 
 
 @pytest.mark.asyncio

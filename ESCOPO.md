@@ -267,6 +267,24 @@ G. Quando receber [IMAGEM RECEBIDA] descrevendo uma raquete, registre o que
 
 ---
 
+## Sprint 2.6 — Diagnose deprecated no WhatsApp (refatoração estratégica)
+
+Em produção (Maio/2026), o `diagnose` ativo no agente do WhatsApp estava canibalizando o valor da Consultoria Base Sports (R$350, abatido na compra). O classificador frequentemente roteava clientes determinados pra diagnose, forçando perguntas sobre nível/lesão/esporte prévio que (a) atrasavam quem vinha decidido, e (b) entregavam de graça parte do diagnóstico que é o produto principal.
+
+**Decisão estratégica:** o agente do WhatsApp NUNCA faz diagnóstico longo. Atende, vende, convida pra loja. Quando o cliente pede orientação genérica (sem nomear produto), o agente oferece:
+1. **Consultoria com especialista** — R$350, abatido se fechar raquete no mesmo dia.
+2. **Visita à loja** — gratuita, presencial.
+
+**Mudanças técnicas (Sprint 2.6):**
+- `diagnose` removido do grafo LangGraph (arquivo mantido com docstring DEPRECATED para futura Consultoria virtual).
+- Triage simplificado pra 9 intents declarativos (`smalltalk`, `product_inquiry`, `price_inquiry`, `purchase_intent`, `scheduling_inquiry`, `out_of_scope`, `faq`, `help_request`, `close`).
+- State limpo: `customer_intent_path` e `awaiting_alternatives_decision` removidos (não fazem mais sentido sem o fork determined/exploring).
+- `recommend.py` simplificado — sem REFERENCE-SIM / REFERENCE-NÃO / PROFILE; única responsabilidade: ver se o produto existe no Bling e responder com confirmação curta.
+- Novo nó `help_request` com 3 variações deterministicamente pickadas por `phone_hash`.
+- Tabela legacy `products` esvaziada via migration `0008_truncate_products_seed.sql` (agente lê de `bling_products` quando Bling ativo).
+- ~95 testes da era diagnose marcados como skipped com motivo "diagnose deprecated in Sprint 2.6".
+- 15 testes novos em `tests/test_help_request.py`.
+
 ## Decisões registradas
 
 - **OpenAI permanece**, Anthropic descartado (stub removido)

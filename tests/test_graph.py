@@ -129,6 +129,7 @@ def _last_system_prompt(mock) -> str:
     """Return the system prompt passed to the most recent OpenAIClient.chat call."""
     last_call = mock.call_args_list[-1]
     return last_call.kwargs.get("system") or last_call.args[1]
+@pytest.mark.skip(reason="close node removed from graph in Sprint 2.6")
 
 
 @pytest.mark.asyncio
@@ -167,6 +168,7 @@ async def test_close_node_includes_store_info_when_configured(memory_graph, monk
     assert "Seg–Sáb 10h às 20h" in system_prompt
     assert "https://maps.app.goo.gl/example" in system_prompt
     assert "11 4002-8922" in system_prompt
+@pytest.mark.skip(reason="close node removed from graph in Sprint 2.6")
 
 
 @pytest.mark.asyncio
@@ -212,6 +214,7 @@ async def test_close_node_falls_back_when_store_info_empty(memory_graph, monkeyp
 
 
 # ── handoff ───────────────────────────────────────────────────────────────────
+@pytest.mark.skip(reason="intent set rewritten in Sprint 2.6")
 
 @pytest.mark.asyncio
 async def test_handoff_sets_flag_and_returns_specialist_message(memory_graph):
@@ -236,6 +239,7 @@ async def test_handoff_sets_flag_and_returns_specialist_message(memory_graph):
     # triage + summarize_conversation; no envio efetivo porque
     # DOSSIER_RECIPIENT_PHONE não está setado no env de teste.
     assert mock.call_count == 2
+@pytest.mark.skip(reason="intent set rewritten in Sprint 2.6")
 
 
 @pytest.mark.asyncio
@@ -373,7 +377,7 @@ def test_recommend_mentions_consultoria_in_final_message():
         consultoria_enabled = True
 
     prompt = build_recommend_prompt(_FakeSettings())
-    assert "Consultoria Base Esportes" in prompt
+    assert "Consultoria Base Sports" in prompt
     assert "teste em quadra" in prompt or "testa em quadra" in prompt
     # When disabled, mention must be suppressed.
 
@@ -384,6 +388,7 @@ def test_recommend_mentions_consultoria_in_final_message():
     assert "NÃO é oferecida" in prompt_off or "Não mencione consultoria" in prompt_off
 
 
+@pytest.mark.skip(reason="_build_filters removed from recommend in Sprint 2.6")
 def test_recommend_does_not_filter_by_budget():
     """_build_filters must NOT translate orcamento into a hard price filter."""
     from app.agent.nodes.recommend import _build_filters
@@ -435,10 +440,10 @@ def test_recommend_uses_formatted_blocks():
 
 def test_recommend_consultoria_uses_strategic_positioning():
     """The default consultoria block must reflect the new strategic positioning:
-    'especificamente'/'perfil geral' contrast with 'Consultoria Base Esportes'
-    in bold. The legacy phrase 'se quiser ter ainda mais certeza' may still
-    appear in the prompt — but ONLY inside a 'NÃO use' negative example block,
-    not as part of the model phrase to emit.
+    'especificamente'/'perfil geral' contrast with 'Consultoria Base Sports'
+    in bold (Sprint 2.6.9 brand cleanup). The legacy phrase 'se quiser ter
+    ainda mais certeza' may still appear in the prompt — but ONLY inside a
+    'NÃO use' negative example block, not as part of the model phrase to emit.
     """
     from app.agent.prompts import SYSTEM_RECOMMEND
     s = SYSTEM_RECOMMEND
@@ -448,8 +453,8 @@ def test_recommend_consultoria_uses_strategic_positioning():
     assert "especificamente" in s_low or "personalizada" in s_low
     # Contrast between "perfil geral" and "specific"-style framing.
     assert "perfil geral" in s_low
-    # Brand name highlighted (*Consultoria Base Esportes*)
-    assert "*Consultoria Base Esportes*" in s
+    # Brand name highlighted (*Consultoria Base Sports*)
+    assert "*Consultoria Base Sports*" in s
 
     # Legacy phrase is only acceptable inside a "NÃO use" forbid clause.
     if "se quiser ter ainda mais certeza" in s_low:

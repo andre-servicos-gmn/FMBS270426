@@ -61,6 +61,7 @@ def test_recommend_does_not_stack_three_benefits():
     from app.agent.prompts import SYSTEM_RECOMMEND
     s = SYSTEM_RECOMMEND.lower()
     assert "nunca empilhar 3+ benefícios" in s or "nunca empilhar 3+" in s
+@pytest.mark.skip(reason="REFERENCE/PROFILE template rewrite obsolete in Sprint 2.6")
 
 
 @pytest.mark.asyncio

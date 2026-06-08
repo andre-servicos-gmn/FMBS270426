@@ -64,13 +64,17 @@ def test_matcher_handles_extra_spaces_inside_name():
 # ── Layer 3 — fuzzy ───────────────────────────────────────────────────────────
 
 def test_matcher_handles_typo_small():
-    """1-char typo close to threshold → low confidence."""
+    """1-char typo close to threshold → matches via any of the fuzzy layers.
+
+    Sprint 2.6.4 added the Levenshtein-normalized layer ahead of the
+    legacy SequenceMatcher fuzzy, so a small typo may now resolve via
+    method='levenshtein' instead of method='fuzzy'. Both are valid
+    high-confidence matches.
+    """
     r = match_product_tolerant("quero a BeechPro Carbon X5", _ALL)
     assert r.product is _BEACH
-    # 1 char off in a longer string → high ratio. Either high or low is acceptable
-    # depending on string lengths; the important thing is we DO match.
     assert r.confidence in ("high", "low")
-    assert r.method in ("fuzzy", "spaces_collapsed")
+    assert r.method in ("fuzzy", "spaces_collapsed", "levenshtein", "token")
 
 
 def test_matcher_returns_low_confidence_for_fuzzy_ratio_below_95():
@@ -86,17 +90,21 @@ def test_matcher_returns_low_confidence_for_fuzzy_ratio_below_95():
 # ── Layer 4 — token unicity ───────────────────────────────────────────────────
 
 def test_matcher_falls_back_to_token_unicity():
-    """A unique distinctive token (5+ chars, non-generic) → low confidence match."""
-    # 'Vertex' is unique to one product. We deliberately mention only that token.
+    """A unique distinctive token → matches via the token layer.
+
+    Sprint 2.6.4 — the new token-score layer fires earlier and with HIGH
+    confidence (score 1.0 single product = exact). The legacy 'token
+    unicity' fallback only runs when token-score < 0.7. Either confidence
+    is acceptable; the assertion that matters is the PRODUCT picked.
+    """
     products = [
         _BEACH,
         _product("Raquete VertexBT Pro Elite"),
     ]
     r = match_product_tolerant("vou de vertexbt", products)
     assert r.product is products[1]
-    # Token unicity is always low confidence by design.
-    assert r.confidence == "low"
-    assert r.method in ("token", "fuzzy")
+    assert r.confidence in ("high", "low")
+    assert r.method in ("token", "fuzzy", "levenshtein")
 
 
 # ── No match ──────────────────────────────────────────────────────────────────

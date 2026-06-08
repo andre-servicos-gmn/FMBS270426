@@ -1,4 +1,4 @@
-"""pitch_consultoria_node — presents the Consultoria Base Esportes to the customer.
+"""pitch_consultoria_node — presents the Consultoria Base Sports to the customer.
 
 Triggered when triage classifies the message as ``consultoria`` (customer asked
 about price, how it works, or expressed interest in booking). The node uses an

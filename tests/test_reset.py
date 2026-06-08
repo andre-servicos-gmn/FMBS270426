@@ -2,6 +2,9 @@
 
 ⚠️ DEV/PILOT ONLY. Drop this file when removing the /reset feature; see
 app/agent/reset.py for the full removal checklist.
+
+Sprint 2.7 — /reset is now gated by ``RESET_ALLOWED_PHONES``. Tests cover
+the allowed/denied paths plus the existing wipe + idempotency paths.
 """
 from unittest.mock import AsyncMock, patch
 
@@ -9,13 +12,14 @@ import fakeredis.aioredis as fakeredis_aioredis
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.agent.reset import is_reset_command, reset_conversation
+from app.agent.reset import is_reset_authorized, is_reset_command, reset_conversation
 from app.main import app
 from app.security.pii_masker import hash_phone
 
 
 _TOKEN = "test-webhook-token-abc"
 _PHONE = "5511987654321"
+_UNAUTHORIZED_PHONE = "5511000000000"
 
 
 # ── 1. is_reset_command — pure detection ─────────────────────────────────────
@@ -84,7 +88,33 @@ def _payload(text: str, message_id: str = "MSG-RESET-001") -> dict:
 
 @pytest.fixture
 def override_token(monkeypatch):
+    """Sprint 2.7 — token + reset allowlist with _PHONE authorized. Existing
+    tests that rely on /reset succeeding use this fixture."""
     monkeypatch.setenv("EVOLUTION_WEBHOOK_TOKEN", _TOKEN)
+    monkeypatch.setenv("RESET_ALLOWED_PHONES", _PHONE)
+    from app.config import get_settings
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def override_token_only(monkeypatch):
+    """Webhook auth on, but RESET_ALLOWED_PHONES NOT set. Used by tests that
+    verify /reset is denied for everyone in this state."""
+    monkeypatch.setenv("EVOLUTION_WEBHOOK_TOKEN", _TOKEN)
+    monkeypatch.delenv("RESET_ALLOWED_PHONES", raising=False)
+    from app.config import get_settings
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def no_webhook_token(monkeypatch):
+    """Webhook auth disabled (empty token). Mirrors the dev-pilot default."""
+    monkeypatch.setenv("EVOLUTION_WEBHOOK_TOKEN", "")
+    monkeypatch.setenv("RESET_ALLOWED_PHONES", _PHONE)
     from app.config import get_settings
     get_settings.cache_clear()
     yield
@@ -173,3 +203,237 @@ async def test_webhook_non_reset_message_does_not_trigger_reset(override_token):
     assert resp.status_code == 200
     assert resp.json().get("reset") is not True
     mock_reset.assert_not_called()
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Sprint 2.7 — RESET_ALLOWED_PHONES allowlist + EVOLUTION_WEBHOOK_TOKEN auth
+# ════════════════════════════════════════════════════════════════════════════
+
+
+# ── is_reset_authorized ─────────────────────────────────────────────────────
+
+def test_reset_authorized_empty_allowlist_denies_all(monkeypatch):
+    monkeypatch.setenv("RESET_ALLOWED_PHONES", "")
+    from app.config import get_settings
+    get_settings.cache_clear()
+    try:
+        assert is_reset_authorized(_PHONE) is False
+        assert is_reset_authorized(_UNAUTHORIZED_PHONE) is False
+        assert is_reset_authorized("") is False
+    finally:
+        get_settings.cache_clear()
+
+
+def test_reset_authorized_matches_listed_phone(monkeypatch):
+    monkeypatch.setenv("RESET_ALLOWED_PHONES", f"{_PHONE},{_UNAUTHORIZED_PHONE}")
+    from app.config import get_settings
+    get_settings.cache_clear()
+    try:
+        assert is_reset_authorized(_PHONE) is True
+        assert is_reset_authorized(_UNAUTHORIZED_PHONE) is True
+        assert is_reset_authorized("5511555555555") is False
+    finally:
+        get_settings.cache_clear()
+
+
+def test_reset_authorized_tolerates_cosmetic_formatting(monkeypatch):
+    """Spaces, dashes, and a leading '+' in the env var must not break
+    the digit-only comparison."""
+    monkeypatch.setenv("RESET_ALLOWED_PHONES", "  +55 (11) 98765-4321 ")
+    from app.config import get_settings
+    get_settings.cache_clear()
+    try:
+        assert is_reset_authorized("5511987654321") is True
+    finally:
+        get_settings.cache_clear()
+
+
+# ── End-to-end /reset routing through the webhook ───────────────────────────
+
+@pytest.mark.asyncio
+async def test_reset_denied_for_unauthorized_phone(override_token_only, caplog):
+    """RESET_ALLOWED_PHONES unset → ANY /reset is denied silently. The
+    webhook acks 200 but no reset is dispatched and no client reply is sent."""
+    import logging
+    fake = fakeredis_aioredis.FakeRedis(decode_responses=True)
+
+    mock_graph = AsyncMock()
+    mock_graph.ainvoke = AsyncMock()
+
+    caplog.set_level(logging.WARNING, logger="app.api.webhook")
+
+    with (
+        patch("app.api.webhook._get_graph", return_value=mock_graph),
+        patch("app.api.webhook.EvolutionClient") as MockEvo,
+        patch("app.api.webhook.reset_conversation") as mock_reset,
+        patch("app.storage.redis_session._get_redis_client", return_value=fake),
+    ):
+        MockEvo.return_value.send_text = AsyncMock()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/webhook/whatsapp",
+                json=_payload("/reset", message_id="MSG-DENIED-001"),
+                headers={"apikey": _TOKEN},
+            )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {"status": "ok", "reset": "denied"}, body
+
+    # Critical: NOTHING was reset, NOTHING was replied.
+    mock_reset.assert_not_called()
+    MockEvo.return_value.send_text.assert_not_called()
+    mock_graph.ainvoke.assert_not_called()
+
+    # Diagnostic log present.
+    assert any(
+        "reset_denied" in rec.message and "unauthorized" in rec.message
+        for rec in caplog.records
+    ), "expected 'reset_denied ... unauthorized' warning"
+
+
+@pytest.mark.asyncio
+async def test_reset_allowed_for_authorized_phone(override_token):
+    """Same /reset payload but with _PHONE in RESET_ALLOWED_PHONES → reset
+    fires + canned reply (this is the existing happy-path, re-asserted)."""
+    fake = fakeredis_aioredis.FakeRedis(decode_responses=True)
+
+    mock_graph = AsyncMock()
+    mock_graph.ainvoke = AsyncMock()
+
+    with (
+        patch("app.api.webhook._get_graph", return_value=mock_graph),
+        patch("app.api.webhook.EvolutionClient") as MockEvo,
+        patch("app.agent.reset._get_redis_client", return_value=fake),
+        patch("app.storage.redis_session._get_redis_client", return_value=fake),
+    ):
+        MockEvo.return_value.send_text = AsyncMock()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/webhook/whatsapp",
+                json=_payload("/reset", message_id="MSG-ALLOWED-001"),
+                headers={"apikey": _TOKEN},
+            )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok", "reset": True}
+    MockEvo.return_value.send_text.assert_called_once()
+
+
+# ── EVOLUTION_WEBHOOK_TOKEN auth ────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_webhook_rejects_invalid_token(override_token, caplog):
+    """Token configured + wrong header → 401 with 'token_mismatch' log."""
+    import logging
+    caplog.set_level(logging.WARNING, logger="app.api.webhook")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/webhook/whatsapp",
+            json=_payload("oi", message_id="MSG-BAD-AUTH-001"),
+            headers={"apikey": "wrong-token-xyz"},
+        )
+
+    assert resp.status_code == 401
+    assert any(
+        "webhook_auth_failed" in rec.message and "token_mismatch" in rec.message
+        for rec in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_webhook_rejects_missing_header(override_token, caplog):
+    """Token configured + NO header → 401 with 'missing_header' log."""
+    import logging
+    caplog.set_level(logging.WARNING, logger="app.api.webhook")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/webhook/whatsapp",
+            json=_payload("oi", message_id="MSG-NO-AUTH-001"),
+            # no apikey header
+        )
+
+    assert resp.status_code == 401
+    assert any(
+        "webhook_auth_failed" in rec.message and "missing_header" in rec.message
+        for rec in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_webhook_accepts_valid_token(override_token, caplog):
+    """Token configured + correct header → 200 + 'webhook_auth_ok' log."""
+    import logging
+    fake = fakeredis_aioredis.FakeRedis(decode_responses=True)
+
+    mock_graph = AsyncMock()
+    mock_graph.ainvoke = AsyncMock(
+        return_value={
+            "messages": [],
+            "phone_hash": "x",
+            "intent": "smalltalk",
+            "player_profile": {},
+            "recommended_products": [],
+            "needs_handoff": False,
+            "handoff_reason": None,
+        }
+    )
+
+    caplog.set_level(logging.INFO, logger="app.api.webhook")
+
+    with (
+        patch("app.api.webhook._get_graph", return_value=mock_graph),
+        patch("app.api.webhook.EvolutionClient") as MockEvo,
+        patch("app.storage.redis_session._get_redis_client", return_value=fake),
+    ):
+        MockEvo.return_value.send_text = AsyncMock()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/webhook/whatsapp",
+                json=_payload("oi", message_id="MSG-GOOD-AUTH-001"),
+                headers={"apikey": _TOKEN},
+            )
+
+    assert resp.status_code == 200
+    assert any("webhook_auth_ok" in rec.message for rec in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_webhook_open_when_token_not_configured(no_webhook_token, caplog):
+    """EVOLUTION_WEBHOOK_TOKEN empty → request accepted (dev-pilot mode),
+    warning logged so the operator notices."""
+    import logging
+    fake = fakeredis_aioredis.FakeRedis(decode_responses=True)
+
+    mock_graph = AsyncMock()
+    mock_graph.ainvoke = AsyncMock(
+        return_value={
+            "messages": [],
+            "phone_hash": "x",
+            "intent": "smalltalk",
+            "player_profile": {},
+            "recommended_products": [],
+            "needs_handoff": False,
+            "handoff_reason": None,
+        }
+    )
+
+    caplog.set_level(logging.WARNING, logger="app.api.webhook")
+
+    with (
+        patch("app.api.webhook._get_graph", return_value=mock_graph),
+        patch("app.api.webhook.EvolutionClient") as MockEvo,
+        patch("app.storage.redis_session._get_redis_client", return_value=fake),
+    ):
+        MockEvo.return_value.send_text = AsyncMock()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/webhook/whatsapp",
+                json=_payload("oi", message_id="MSG-OPEN-001"),
+                # no apikey header — allowed because token unset
+            )
+
+    assert resp.status_code == 200
+    assert any("webhook_auth_disabled" in rec.message for rec in caplog.records)

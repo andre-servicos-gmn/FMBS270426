@@ -175,18 +175,21 @@ async def test_smalltalk_skips_name_ask_when_already_captured():
 # 2. BARE RECOMMENDATION REQUEST INTENT
 # ════════════════════════════════════════════════════════════════════════════
 
+@pytest.mark.skip(reason="intent removed in Sprint 2.6")
 def test_bare_recommendation_request_in_triage_intent_set():
     """The new intent must be in _VALID_INTENTS so triage doesn't demote it."""
     from app.agent.nodes.triage import _VALID_INTENTS
     assert "bare_recommendation_request" in _VALID_INTENTS
 
 
+@pytest.mark.skip(reason="intent removed in Sprint 2.6")
 def test_triage_prompt_lists_bare_recommendation_request():
     """The prompt must teach the LLM the new category."""
     from app.agent.prompts import SYSTEM_TRIAGE
     assert "bare_recommendation_request" in SYSTEM_TRIAGE
 
 
+@pytest.mark.skip(reason="intent removed in Sprint 2.6")
 def test_triage_router_remaps_bare_recommendation_to_recommend():
     """The router transforms bare_recommendation_request → recommend path."""
     from app.agent.graph import _triage_router
@@ -208,6 +211,7 @@ def test_triage_router_remaps_bare_recommendation_to_recommend():
 # ════════════════════════════════════════════════════════════════════════════
 # 3. REFERENCE-SIM — racket exists
 # ════════════════════════════════════════════════════════════════════════════
+@pytest.mark.skip(reason="REFERENCE-SIM mode removed in Sprint 2.6")
 
 @pytest.mark.asyncio
 async def test_reference_sim_only_keeps_matched_product_in_shortlist():
@@ -238,6 +242,7 @@ async def test_reference_sim_only_keeps_matched_product_in_shortlist():
     assert shortlist[0]["name"] == "Raquete BeachPro Carbon X5"
     # produto_pesquisado is recorded for dossier rendering.
     assert result["produto_pesquisado"] == "BeachPro Carbon X5"
+@pytest.mark.skip(reason="REFERENCE-SIM mode removed in Sprint 2.6")
 
 
 @pytest.mark.asyncio
@@ -263,6 +268,7 @@ async def test_reference_sim_context_signals_have_stock():
 # ════════════════════════════════════════════════════════════════════════════
 # 4. REFERENCE-NÃO — racket missing from catalog
 # ════════════════════════════════════════════════════════════════════════════
+@pytest.mark.skip(reason="REFERENCE-NÃO mode removed in Sprint 2.6")
 
 @pytest.mark.asyncio
 async def test_reference_nao_does_not_keep_alternatives_in_shortlist():
@@ -287,6 +293,7 @@ async def test_reference_nao_does_not_keep_alternatives_in_shortlist():
     assert result["recommended_products"] == []
     assert result["consultoria_interest"] is True
     assert result["produto_pesquisado"] == "Wilson Pro Staff"
+@pytest.mark.skip(reason="REFERENCE-NÃO mode removed in Sprint 2.6")
 
 
 @pytest.mark.asyncio
@@ -311,6 +318,7 @@ async def test_reference_nao_context_signals_missing_and_has_consultoria_price()
 # ════════════════════════════════════════════════════════════════════════════
 # 5. PROFILE — no model → consultoria_offer
 # ════════════════════════════════════════════════════════════════════════════
+@pytest.mark.skip(reason="PROFILE mode removed in Sprint 2.6 — see test_help_request")
 
 @pytest.mark.asyncio
 async def test_profile_mode_delegates_to_consultoria_offer():
@@ -335,6 +343,7 @@ async def test_profile_mode_delegates_to_consultoria_offer():
     # The pitch must carry the price + abatimento signal.
     assert "350" in full
     assert "abatido" in full.lower() or "abate" in full.lower()
+@pytest.mark.skip(reason="PROFILE mode removed in Sprint 2.6")
 
 
 @pytest.mark.asyncio

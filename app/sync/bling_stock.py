@@ -26,8 +26,9 @@ _CACHE_PREFIX = "bling:stock:"
 
 
 def _get_redis():
-    from redis.asyncio import Redis
-    return Redis.from_url(get_settings().redis_url, decode_responses=True)
+    # Sprint 2.6.5 — resilient client (keepalive + retry + health_check).
+    from app.storage.redis_resilient import make_resilient_redis
+    return make_resilient_redis(get_settings().redis_url)
 
 
 def _extract_saldo(payload: dict[str, Any], produto_id: int) -> int | None:

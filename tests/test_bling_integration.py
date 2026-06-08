@@ -229,7 +229,11 @@ async def test_request_backoff_on_429(monkeypatch):
 # SYNC — parser + raquete detection
 # ════════════════════════════════════════════════════════════════════════════
 
-def test_parse_description_extracts_perfil_composicao():
+def test_parse_description_extracts_target_attributes_only():
+    """Sprint 2.6.7 — the parser now whitelist-filters to the 5 target
+    attributes (peso/equilibrio/composicao/espessura/comprimento). Labels
+    like "Perfil" and "Detalhamento" used to land in atributos_parseados
+    too, but they were marketing/free-form noise — dropped now."""
     html = """
     <p>Detalhes da raquete:</p>
     <ul>
@@ -239,9 +243,11 @@ def test_parse_description_extracts_perfil_composicao():
     </ul>
     """
     parsed = parse_attributes_from_description(html)
-    assert parsed.get("perfil") == "22mm"
+    # Composição (a target) is captured.
     assert parsed.get("composicao") == "Fibra de carbono 12k"
-    assert parsed.get("detalhamento") == "ideal pra intermediário"
+    # Perfil + Detalhamento are NOT targets — they no longer appear.
+    assert "perfil" not in parsed
+    assert "detalhamento" not in parsed
 
 
 def test_parse_description_empty_html():
@@ -480,7 +486,12 @@ def test_extract_modelo_from_real_payload():
 
 
 def test_parse_atributos_from_html_description():
-    """Description has Tailwind-style HTML with ``- Label: value;`` patterns."""
+    """Sprint 2.6.7 — the parser is now restricted to the 5 target slugs
+    (peso / equilibrio / composicao / espessura / comprimento). The
+    Sprint 2.5.2 expectations for "perfil" and "detalhamento" were
+    dropped — those labels are no longer captured (they were marketing /
+    free-form noise contaminating ``atributos_parseados``).
+    """
     from app.sync.bling_sync import detail_to_row
 
     fixture = _load_real_fixture()
@@ -489,16 +500,19 @@ def test_parse_atributos_from_html_description():
         fixture["data"], category_map=category_map, field_map=field_map,
     )
     parsed = row["atributos_parseados"]
-    # All four attributes the user said must come through.
-    assert parsed.get("perfil") == "Avançado"
+    # Target attributes that survived the whitelist.
     assert "composicao" in parsed
     assert "carbono" in (parsed.get("composicao") or "").lower()
-    assert parsed.get("detalhamento", "").startswith("Superfície áspera")
     assert parsed.get("comprimento") == "50cm"
+    # Restricted-out labels.
+    assert "perfil" not in parsed
+    assert "detalhamento" not in parsed
 
 
 def test_strip_html_before_regex_parses():
-    """Direct unit on the description parser with raw HTML input."""
+    """Sprint 2.6.7 — the parser strips HTML and handles mixed dash chars.
+    "Perfil" is no longer captured (restricted), so we only assert the
+    targets that survive the whitelist (composicao + peso)."""
     from app.sync.bling_sync import parse_attributes_from_description
 
     html = """<p style="font-family: Tailwind"><strong>Características:</strong></p>
@@ -506,9 +520,10 @@ def test_strip_html_before_regex_parses():
               <p>- Composição: Fibra de vidro;</p>
               <p>– Peso: 320g;</p>"""  # mixed dashes
     parsed = parse_attributes_from_description(html)
-    assert parsed.get("perfil") == "Iniciante"
     assert parsed.get("composicao") == "Fibra de vidro"
     assert parsed.get("peso") == "320g"
+    # Perfil is restricted-out now.
+    assert "perfil" not in parsed
 
 
 def test_custom_fields_id_only_resolves_via_map():
@@ -665,7 +680,10 @@ def test_detail_to_row_extracts_all_fields():
     assert row["nome"] == "Raquete X"
     assert row["is_raquete_praia"] is True
     assert row["campos_customizados"]["Indicação"] == "intermediário"
-    assert row["atributos_parseados"].get("perfil") == "22mm"
+    # Sprint 2.6.7 — only the 5 target attributes are captured from the
+    # description; "Perfil" is restricted-out. Composição still goes through.
+    assert "perfil" not in row["atributos_parseados"]
+    assert row["atributos_parseados"].get("composicao") == "Carbono"
     assert row["marca"] == "BeachPro"
     assert row["categoria_nome"] == "Raquetes de Praia"
     assert float(row["preco"]) == 899.0
@@ -969,20 +987,23 @@ def _bling_row(name: str, *, is_raquete: bool, price_cents: int = 89900) -> dict
 
 @pytest.mark.asyncio
 async def test_recommend_uses_bling_products_when_enabled(monkeypatch):
-    """When BLING_CLIENT_ID is set, recommend's REFERENCE search hits bling_products."""
+    """Sprint 2.6.3 — recommend's catalog candidates come from
+    ``get_catalog_snapshot()`` (the in-memory cache), no longer via the
+    per-message ``fetch_product_by_name``. Mocking the snapshot fully
+    controls the candidate list the matcher sees."""
     monkeypatch.setenv("BLING_CLIENT_ID", "cid")
     from app.config import get_settings
     get_settings.cache_clear()
 
-    from app.agent.nodes.recommend import _search_reference
+    from app.agent.nodes.recommend import _list_catalog_candidates
     bling_row = _bling_row("Raquete BeachPro Carbon X5", is_raquete=True)
     with patch(
-        "app.sync.bling_repo.fetch_product_by_name",
+        "app.sync.bling_catalog_cache.get_catalog_snapshot",
         new_callable=AsyncMock, return_value=[bling_row],
     ):
-        matched, candidates = await _search_reference({}, "Raquete BeachPro Carbon X5")
-    assert matched is not None
-    assert matched["name"] == "Raquete BeachPro Carbon X5"
+        candidates = await _list_catalog_candidates("Raquete BeachPro Carbon X5")
+    assert candidates
+    assert candidates[0]["name"] == "Raquete BeachPro Carbon X5"
 
 
 @pytest.mark.asyncio
@@ -1070,6 +1091,10 @@ async def test_product_detail_non_raquete_no_pitch():
     # Override description-search path defensively
     result = await product_detail_node(state)
     full = " ".join(result["response_blocks"])
-    assert "Consultoria" not in full or "Consultoria Base Esportes" in full
+    # Sprint 2.6.9 — the micro-tag at product_detail.py also says
+    # "Consultoria Base Sports" (brand cleanup) so we detect the PITCH
+    # by its unique signature: price + abatido + CTA.
+    assert "R$ 350" not in full
+    assert "abatido" not in full.lower()
     # We don't increment the cap counter when no real pitch happened.
     assert result.get("consultoria_mentioned_count") is None

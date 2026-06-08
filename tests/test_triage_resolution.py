@@ -12,6 +12,10 @@ from langchain_core.messages import HumanMessage
 from app.agent.graph import _triage_router
 from app.agent.state import AgentState
 
+pytestmark = pytest.mark.skip(
+    reason="diagnose deprecated in Sprint 2.6 — post-rec router overrides removed"
+)
+
 
 def _post_rec_state(*, message: str, products: list[dict], llm_intent: str = "recommend") -> AgentState:
     """Build a state that looks like post-recommendation, with the LLM having

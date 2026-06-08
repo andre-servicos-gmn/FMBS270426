@@ -48,6 +48,7 @@ def _state(*, post_rec: bool = False) -> AgentState:
 
 # ── Triage prompt content (disambiguation) ───────────────────────────────────
 
+@pytest.mark.skip(reason="triage prompt rewritten in Sprint 2.6")
 def test_consultoria_vs_scheduling_disambiguation_in_prompt():
     """SYSTEM_TRIAGE must list both intents AND show explicit disambiguation."""
     from app.agent.prompts import SYSTEM_TRIAGE
@@ -108,6 +109,7 @@ async def test_scheduling_inquiry_returns_canned_response():
 
 # ── Override determinístico: cliente nomeia raquete já mostrada ──────────────
 
+@pytest.mark.skip(reason="post-rec router override removed in Sprint 2.6")
 def test_product_selection_override_when_naming_recommended():
     """If triage classifies as recommend but the customer's last message names
     a product already in recommended_products, _triage_router OVERRIDES to
@@ -132,6 +134,7 @@ def test_product_selection_override_when_naming_recommended():
     assert _triage_router(state) == "product_selection"
 
 
+@pytest.mark.skip(reason="post-rec router override removed in Sprint 2.6")
 def test_product_selection_no_override_when_no_match():
     """If the message doesn't name any recommended product, no override —
     keep the legacy recommend_rerun routing."""

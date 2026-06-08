@@ -37,9 +37,12 @@ _STATE_TTL_S = 300  # 5 minutes
 
 
 def _get_redis():
-    """Local helper so tests can monkeypatch easily."""
-    from redis.asyncio import Redis  # local import keeps test patching simple
-    return Redis.from_url(get_settings().redis_url, decode_responses=True)
+    """Local helper so tests can monkeypatch easily.
+
+    Sprint 2.6.5 — resilient client (keepalive + retry + health_check).
+    """
+    from app.storage.redis_resilient import make_resilient_redis
+    return make_resilient_redis(get_settings().redis_url)
 
 
 # ── OAuth authorize / callback ──────────────────────────────────────────

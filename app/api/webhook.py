@@ -1,17 +1,25 @@
 """POST /webhook/whatsapp — receives messages from Evolution API (WhatsApp)."""
 import logging
+import time
 import uuid
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from fastapi.security import APIKeyHeader
 from langchain_core.messages import AIMessage, HumanMessage
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import RedisError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from app.adapters.evolution import EvolutionClient
 from app.adapters.media_processor import transcribe_audio
 from app.agent.graph import build_graph
 from app.agent.message_splitter import parse_messages
-from app.agent.reset import is_reset_command, reset_conversation  # DEV_RESET_HOOK
+from app.agent.reset import (
+    is_reset_authorized,
+    is_reset_command,
+    reset_conversation,
+)  # DEV_RESET_HOOK
 from app.config import get_settings
 from app.security.audit_log import log_access
 from app.security.pii_masker import hash_phone, mask_pii
@@ -48,6 +56,164 @@ def _get_graph():  # type: ignore[return]
     return _graph
 
 
+# ── Sprint 2.6.5 — resilient retry layer + honest fallback ──────────────────
+
+# Fallback wording — discreet, human-sounding. The spec FORBIDS the words
+# "erro", "falha", "problema técnico", "sistema", "bug", "indisponível".
+# Enforced by test_redis_resilience::test_fallback_message_has_no_forbidden_words.
+_FALLBACK_CLIENT_MESSAGE = "Opa, me dá só um segundinho que já te respondo 🙌"
+
+# Anti-repeat marker: same phone_hash → fallback at most once per window.
+# Module-level dict survives within the process; if the process dies the
+# state resets, which is acceptable behaviour (the next failure cycle is
+# treated fresh after a restart).
+_FALLBACK_REPEAT_WINDOW_S = 60
+_fallback_last_sent: dict[str, float] = {}
+
+
+def _is_redis_connection_error(exc: BaseException) -> bool:
+    """Heuristic: looks like a dead/idle/closed Redis connection?
+
+    Matches both real ``redis-py`` exceptions AND the
+    ``'NoneType' object is not callable`` symptom we observed in
+    production — that string surfaces when the internal connection pool
+    of the saver was torn down but the wrapper object still exists, so
+    method lookups (.exists, .setex, .aput) resolve to None.
+    """
+    if isinstance(exc, (RedisConnectionError, RedisTimeoutError, RedisError)):
+        return True
+    if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
+        return True
+    s = str(exc).lower()
+    if "nonetype" in s and "callable" in s:
+        return True
+    if any(token in s for token in ("connection", "timeout", "redis", "closed")):
+        return True
+    return False
+
+
+async def _reconnect_redis_singletons() -> None:
+    """Discard the Redis-backed singletons so the next call rebuilds them.
+
+    Replaces:
+    - ``app.storage.redis_session._redis_client`` (idempotency + session store)
+    - ``app.agent.checkpointer._saver`` (LangGraph checkpointer)
+    - ``app.api.webhook._graph`` (compiled graph holds the old saver)
+
+    The new graph is recompiled lazily on the next ``_get_graph()`` call.
+    """
+    global _graph
+    from app.agent.checkpointer import init_checkpointer, reset_checkpointer
+    from app.storage.redis_session import reset_redis_client
+
+    await reset_redis_client()
+    await reset_checkpointer()
+    # Rebuild checkpointer immediately so the next graph compile uses it.
+    await init_checkpointer()
+    _graph = None
+    logger.info("redis_singletons_reconnected (next request rebuilds graph)")
+
+
+async def _ainvoke_with_retry(state_update: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    """Sprint 2.6.5 Camada 2 — retry the graph invocation once when the
+    first attempt fails with a Redis connection error. Between attempts
+    we tear down + rebuild every Redis-backed singleton so the second
+    attempt uses a fresh client + fresh checkpointer.
+    """
+    max_attempts = 2
+    last_exc: BaseException | None = None
+    for attempt in range(1, max_attempts + 1):
+        graph = _get_graph()
+        try:
+            result = await graph.ainvoke(state_update, config=config)
+            if attempt > 1:
+                logger.info("graph_retry_success attempt=%d", attempt)
+            return result
+        except Exception as exc:  # noqa: BLE001 — we re-raise non-redis
+            last_exc = exc
+            if attempt == max_attempts:
+                logger.error("graph_retry_exhausted attempts=%d: %s", attempt, exc)
+                raise
+            if not _is_redis_connection_error(exc):
+                # Non-Redis error → don't retry, propagate immediately.
+                raise
+            logger.info(
+                "graph_retry_attempt reason=redis_connection attempt=%d err=%.120s",
+                attempt + 1, str(exc),
+            )
+            try:
+                await _reconnect_redis_singletons()
+            except Exception as reconn_exc:
+                logger.error("graph_retry_reconnect_failed: %s", reconn_exc)
+                raise last_exc from reconn_exc
+    # Unreachable — the loop either returns or raises.
+    raise last_exc  # type: ignore[misc]
+
+
+def _fallback_should_emit(phone_hash: str) -> bool:
+    """Anti-repeat gate. Returns True when we may send a fallback now."""
+    now = time.time()
+    last = _fallback_last_sent.get(phone_hash, 0.0)
+    if now - last < _FALLBACK_REPEAT_WINDOW_S:
+        return False
+    _fallback_last_sent[phone_hash] = now
+    return True
+
+
+async def _send_fallback_and_alert(
+    raw_phone: str, phone_hash: str, exc: BaseException
+) -> None:
+    """Sprint 2.6.5 Camada 3 — last resort when retry is exhausted.
+
+    Sends:
+    1. A discreet, human-sounding hold-on to the CLIENT (no error vocab,
+       no technical emojis).
+    2. A technical alert to the configured ``DOSSIER_RECIPIENT_PHONE``
+       (Andre's WhatsApp) so the gap doesn't go unnoticed.
+
+    Both sends are best-effort: if Evolution itself is down too, we just
+    log and move on — the alternative (re-raising) drops a 500 in the
+    background task which serves nobody.
+    """
+    if not _fallback_should_emit(phone_hash):
+        logger.info(
+            "fallback_suppressed phone_hash=%.8s window_s=%d",
+            phone_hash, _FALLBACK_REPEAT_WINDOW_S,
+        )
+        return
+
+    # 1) Client message
+    try:
+        await EvolutionClient().send_text(raw_phone, _FALLBACK_CLIENT_MESSAGE)
+        logger.info("fallback_client_msg_sent phone_hash=%.8s", phone_hash)
+    except Exception as send_exc:  # noqa: BLE001 — best effort
+        logger.error(
+            "fallback_client_msg_send_failed phone_hash=%.8s: %s",
+            phone_hash, send_exc,
+        )
+
+    # 2) Andre alert
+    recipient = (get_settings().dossier_recipient_phone or "").strip()
+    if not recipient:
+        logger.info("fallback_alert_skipped reason=no_recipient_configured")
+        return
+
+    from datetime import datetime
+    alert = (
+        f"⚠️ ALERTA TÉCNICO — Base Sports\n"
+        f"Cliente phone_hash={phone_hash[:12]}… teve mensagem não respondida.\n"
+        f"Motivo: falha de conexão (Redis) após retry.\n"
+        f"Horário: {datetime.now().strftime('%d/%m/%Y %H:%M')}\n"
+        f"Erro: {str(exc)[:200]}\n"
+        f"Ação: verificar conexão / cliente pode precisar reenviar."
+    )
+    try:
+        await EvolutionClient().send_text(recipient, alert)
+        logger.info("fallback_alert_sent")
+    except Exception as alert_exc:  # noqa: BLE001 — best effort
+        logger.error("fallback_alert_send_failed: %s", alert_exc)
+
+
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 _APIKEY_HEADER = APIKeyHeader(name="apikey", auto_error=False)
@@ -56,22 +222,44 @@ _APIKEY_HEADER = APIKeyHeader(name="apikey", auto_error=False)
 async def _require_token(apikey: str | None = Depends(_APIKEY_HEADER)) -> str | None:
     """Validate the inbound webhook token.
 
-    When ``EVOLUTION_WEBHOOK_TOKEN`` is unset (empty string), auth is BYPASSED
-    and the request is accepted. A warning is logged on every call so the
-    operator notices and re-enables auth before production. This exists
-    because some self-hosted Evolution builds do not allow configuring a
-    custom header on outbound webhooks — the pilot URL is obscure (ngrok
-    subdomain, unpublished), so the risk is bounded for dev.
+    Sprint 2.7 — explicit log lines for every path so operators can debug
+    Evolution misconfiguration from the logs alone:
+      * token unset           → ``webhook_auth_disabled``  (warning per call)
+      * header missing        → ``webhook_auth_failed reason=missing_header``
+      * header wrong          → ``webhook_auth_failed reason=token_mismatch``
+      * header matches        → ``webhook_auth_ok``
+
+    When ``EVOLUTION_WEBHOOK_TOKEN`` is unset, auth is BYPASSED and the
+    request is accepted (a warning is logged on every call so the operator
+    notices). This exists because some self-hosted Evolution builds don't
+    allow configuring custom outbound headers; the pilot URL is obscure
+    (ngrok subdomain, unpublished), so the risk is bounded for dev.
+
+    Evolution sends the token in the ``apikey`` HTTP header — same header
+    name Evolution uses for inbound auth on its own API. Configure it in
+    the Evolution panel: Instance Settings → Webhook → Custom Headers →
+    ``apikey: <same value as EVOLUTION_WEBHOOK_TOKEN>``.
     """
     token = get_settings().evolution_webhook_token
     if not token:
         logger.warning(
-            "webhook auth DISABLED (no EVOLUTION_WEBHOOK_TOKEN configured) "
+            "webhook_auth_disabled reason=no_token_configured "
             "— INSECURE, dev/pilot only"
         )
         return None
-    if not apikey or apikey != token:
+    if not apikey:
+        logger.warning(
+            "webhook_auth_failed reason=missing_header "
+            "(expected `apikey` header from Evolution)"
+        )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+    if apikey != token:
+        logger.warning(
+            "webhook_auth_failed reason=token_mismatch "
+            "(Evolution sent a value but it doesn't match EVOLUTION_WEBHOOK_TOKEN)"
+        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+    logger.info("webhook_auth_ok")
     return apikey
 
 
@@ -201,8 +389,23 @@ async def webhook_whatsapp(
     if not message_text:
         return {"status": "ignored", "reason": "empty_text"}
 
-    # ── DEV_RESET_HOOK — magic /reset command (REMOVE BEFORE PRODUCTION) ──────
+    # ── DEV_RESET_HOOK — magic /reset command, gated by allowlist ─────────
     if is_reset_command(message_text):
+        if not is_reset_authorized(raw_phone):
+            # Silent ignore: ack the webhook (Evolution won't retry) but
+            # send NOTHING to the client and dispatch NOTHING to the
+            # graph. This makes "/reset" indistinguishable from any other
+            # silently-dropped message for an unauthorized sender — they
+            # can't probe the command's existence.
+            logger.warning(
+                "reset_denied phone_hash=%.8s reason=unauthorized",
+                phone_hash,
+            )
+            return {"status": "ok", "reset": "denied"}
+
+        logger.info(
+            "reset_authorized phone_hash=%.8s — wiping state", phone_hash,
+        )
         background_tasks.add_task(
             _handle_reset_command,
             raw_phone=raw_phone,
@@ -327,11 +530,10 @@ async def _process_message(
     except Exception as exc:
         logger.warning("lead_upsert_failed phone_hash=%.8s: %s", phone_hash, exc)
 
-    graph = _get_graph()
     config = {"configurable": {"thread_id": phone_hash}}
 
     # Reset turn-scoped flags; other state (player_profile, messages) is kept
-    # by the MemorySaver checkpointer across turns for the same phone_hash.
+    # by the checkpointer across turns for the same phone_hash.
     # Sprint 1.16 — response_blocks MUST be cleared each turn. The active
     # node is expected to fill it (or leave it empty for the splitter
     # fallback). Without this reset, a node that only returns "messages"
@@ -346,9 +548,13 @@ async def _process_message(
     }
 
     try:
-        result: dict[str, Any] = await graph.ainvoke(state_update, config=config)
+        # Sprint 2.6.5 — retry once on Redis-connection errors with a full
+        # singleton reconnect between attempts. If both attempts fail,
+        # Camada 3 emits a discreet fallback to the client + alert to Andre.
+        result: dict[str, Any] = await _ainvoke_with_retry(state_update, config)
     except Exception as exc:
         logger.error("graph_invoke_failed phone_hash=%.8s: %s", phone_hash, exc)
+        await _send_fallback_and_alert(raw_phone, phone_hash, exc)
         return
 
     # Extract last AI message

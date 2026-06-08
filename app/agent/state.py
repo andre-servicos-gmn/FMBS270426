@@ -1,4 +1,4 @@
-from typing import Annotated, Literal, NotRequired, TypedDict
+from typing import Annotated, NotRequired, TypedDict
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
@@ -11,7 +11,7 @@ class AgentState(TypedDict):
     intent: str | None
     # Slots tracked in player_profile. Strategy (Sprint 1.5): the WhatsApp agent
     # is intentionally a shallow diagnostic so it does NOT cannibalize the paid
-    # in-store Consultoria Base Esportes (R$350 with on-court testing). Only the
+    # in-store Consultoria Base Sports (R$350 with on-court testing). Only the
     # ESSENTIAL slots are asked; PROTECTED slots are captured *only* when the
     # customer mentions them spontaneously.
     #
@@ -40,7 +40,7 @@ class AgentState(TypedDict):
     recommended_products: list[dict]
     needs_handoff: bool
     handoff_reason: str | None
-    # True once the customer has been pitched the Consultoria Base Esportes
+    # True once the customer has been pitched the Consultoria Base Sports
     # and we want to remember the interest signal for follow-up.
     consultoria_interest: bool
     # Sprint 1.6: optional list of message blocks for WhatsApp delivery. When
@@ -76,30 +76,57 @@ class AgentState(TypedDict):
     # product (REFERENCE mode), we keep the search term here so dossier
     # rendering can show "Pesquisou: X" even after diagnose finishes.
     produto_pesquisado: NotRequired[str | None]
-    # Sprint 2.1 — customer journey tracking.
-    #   "determined" — customer named a specific racket OR clearly wants to
-    #                  close (skip the diagnose questions).
-    #   "exploring"  — customer asked for indication / doesn't know which one
-    #                  (run diagnose, end in consultoria_offer).
-    #   "unknown"    — no clear signal yet.
-    # Triage assigns this; recommend/price_inquiry/product_detail tailor their
-    # response shape and decide whether to emit the subtle Consultoria pitch.
-    customer_intent_path: NotRequired[Literal["determined", "exploring", "unknown"] | None]
     # Sprint 2.1 — counter that caps the subtle Consultoria pitch at 1
-    # mention per conversation (otherwise it becomes spammy for determined
-    # customers who ask several follow-ups).
+    # mention per conversation (otherwise it becomes spammy for customers
+    # who ask several follow-ups).
     consultoria_mentioned_count: NotRequired[int]
-    # Sprint 2.3 — counts how many technical questions the determined
-    # customer asked. Used by ``maybe_add_subtle_consultoria_offer`` to
-    # apply the DELAYED-pitch timing rule (wait for the 2nd question for
-    # non-IMMEDIATE question types).
+    # Sprint 2.3 — counts how many technical questions the customer asked.
+    # Used by ``maybe_add_subtle_consultoria_offer`` to apply the
+    # DELAYED-pitch timing rule (wait for the 2nd question for non-IMMEDIATE
+    # question types). Sprint 2.6: kept (still drives timing) even though
+    # ``customer_intent_path`` is gone — every customer who reaches the
+    # follow-up nodes effectively determined now.
     determined_question_count: NotRequired[int]
-    # Sprint 2.4 — set to True when REFERENCE-NÃO determined asks the
-    # customer "posso te ajudar a ver outras opções?". Triage reads this on
-    # the next turn to interpret short "sim"/"não" replies as a transition
-    # to exploring (yes) or a graceful goodbye (no).
-    awaiting_alternatives_decision: NotRequired[bool]
-    # Sprint 2.4 — when the customer declines the alternatives offer, triage
-    # routes to smalltalk with this flag set so the node emits a canned
+    # Sprint 2.4 / 2.6 — when the customer declines an offer, triage routes
+    # to smalltalk with this flag set so the node emits a canned
     # "tudo bem, qualquer coisa me chama" goodbye instead of going to LLM.
     goodbye_pending: NotRequired[bool]
+    # Sprint 2.6.2 — when recommend emits "Você quis dizer X?" (fuzzy_low),
+    # the candidate product is stashed here so triage on the next turn can
+    # resolve "sim"/"não" without re-running the fuzzy match.
+    awaiting_match_confirmation: NotRequired[dict | None]
+    # Sprint 2.6.2 — set by triage when the customer declines a fuzzy
+    # suggestion; smalltalk reads it to emit a canned "ok, qual então?" reply.
+    match_decline_pending: NotRequired[bool]
+    # Sprint 2.6.4 — when recommend returns ambiguous (multiple products tied
+    # at the same score) OR shows a top-3 fallback, we stash the candidates
+    # so the next turn can resolve references like "as duas" / "ambas" /
+    # "o segundo" without losing track of the list.
+    last_product_candidates: NotRequired[list[dict] | None]
+    # Sprint 2.6.6 — anti-spam list of "<product_id>:<attribute>" pairs the
+    # agent already alerted Andre about ("não tenho esse dado, vou
+    # confirmar"). Prevents 3 perguntas seguidas sobre o mesmo atributo
+    # ausente em 3 alertas idênticos. Storing as list (not set) so the
+    # checkpointer can serialize cleanly.
+    alerted_missing_attrs: NotRequired[list[str] | None]
+    # Sprint 2.6.8 — set to True the first time help_request_node emits the
+    # Consultoria/loja offer. On every subsequent call, the node detects
+    # this flag and emits a DIFFERENT "refusal/redirect" message instead
+    # of repeating the same pitch (the Felipe loop bug). NEVER auto-cleared:
+    # if the customer eventually names a product, recommend handles them
+    # normally and the flag is irrelevant; if they ask for help again
+    # later, the refusal text is still the correct response.
+    help_request_already_offered: NotRequired[bool]
+    # Sprint 2.6.10 — set to True by recommend_node whenever it emits the
+    # confirmation message ("Posso te passar mais detalhes, ou prefere ver
+    # pessoalmente na loja?"). The next turn's triage uses this flag as a
+    # SHORT-CIRCUIT: if the customer accepts ("detalhes", "sim", "manda"),
+    # route directly to attribute_inquiry without the LLM (which historically
+    # misclassified "detalhes" as help_request or out_of_scope). If the
+    # customer asks price instead, force price_inquiry. Any other input
+    # clears the flag and goes through normal triage.
+    #
+    # CRITICAL: this field MUST exist in the TypedDict — LangGraph's
+    # checkpointer silently discards keys absent from the schema, which
+    # is exactly the failure mode the Felipe production logs showed.
+    awaiting_detail_choice: NotRequired[bool]

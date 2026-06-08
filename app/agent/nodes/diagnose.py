@@ -1,4 +1,14 @@
-"""Sprint 1.8 — diagnose_node em 4 fases.
+"""DEPRECATED em Sprint 2.6 — não está mais conectado ao grafo do WhatsApp.
+
+Mantido pra possível futura Consultoria virtual (refatoração estratégica:
+diagnose presencial pago é o produto principal, agente nunca substitui).
+
+NÃO importar deste módulo nos nodes ativos. NÃO adicionar de volta ao grafo
+sem revisão estratégica.
+
+────────────────────────────────────────────────────────────────────────
+
+Sprint 1.8 — diagnose_node em 4 fases.
 
 Inversão parcial de controle: o código (Python) decide qual é a próxima pergunta
 e aplica auto-fills determinísticos; o LLM continua sendo usado para (1) extrair

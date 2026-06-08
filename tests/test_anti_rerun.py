@@ -142,6 +142,7 @@ async def test_recommend_blocks_rerun_within_threshold():
     assert result["last_node_executed"] == "recommend"
 
 
+@pytest.mark.skip(reason="recommend no longer LLM-driven in Sprint 2.6 — deterministic match path")
 @pytest.mark.asyncio
 async def test_recommend_allows_rerun_after_threshold():
     """recommend > 60s after the previous run → LLM is called normally.
@@ -172,6 +173,7 @@ async def test_recommend_allows_rerun_after_threshold():
     llm.assert_called_once()
 
 
+@pytest.mark.skip(reason="recommend no longer LLM-driven in Sprint 2.6")
 @pytest.mark.asyncio
 async def test_recommend_allows_rerun_with_substantive_new_message():
     """Within the window, a long substantive message bypasses the block."""
@@ -230,5 +232,61 @@ async def test_pitch_consultoria_blocks_rerun():
 async def test_blocked_rerun_returns_fallback_message_not_llm():
     """Sanity: the canned fallback strings are distinct per node."""
     assert fallback_message_for("recommend") != fallback_message_for("pitch_consultoria")
-    assert "Te mostrei algumas opções" in fallback_message_for("recommend")
+    # Sprint 2.6.2 — phantom phrase replaced with neutral ask-for-detail.
+    assert "Pode me dar mais detalhes" in fallback_message_for("recommend")
     assert "Te expliquei a Consultoria" in fallback_message_for("pitch_consultoria")
+
+
+# ── Sprint 2.6.3 — query-similarity unblocks divergent follow-ups ───────────
+
+def _state_with_two_human_messages(prev: str, curr: str, seconds_ago: int = 5) -> AgentState:
+    """Stitch a state where two HumanMessages are visible in the history."""
+    from langchain_core.messages import AIMessage as _AI, HumanMessage as _H
+
+    state: AgentState = {  # type: ignore[typeddict-item]
+        "messages": [
+            _H(content=prev),
+            _AI(content="(agente respondeu algo)"),
+            _H(content=curr),
+        ],
+        "phone_hash": "ar263" * 13,
+        "intent": None,
+        "player_profile": {},
+        "recommended_products": [],
+        "needs_handoff": False,
+        "handoff_reason": None,
+        "consultoria_interest": False,
+    }
+    ts = datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
+    state["last_node_executed"] = "recommend"
+    state["last_node_executed_at"] = ts.isoformat()
+    return state
+
+
+def test_anti_rerun_allows_different_product_query():
+    """Sprint 2.6.3 — asking about a DIFFERENT product within the window
+    must be allowed (previous bug: blocked as 'rerun cego')."""
+    state = _state_with_two_human_messages(
+        prev="vocês têm a Carbon X5?",
+        curr="e a ShotCentauro50?",
+    )
+    assert should_block_rerun(state, "recommend", user_msg="e a ShotCentauro50?") is False
+
+
+def test_anti_rerun_blocks_identical_query():
+    """Literally identical query within the window → still blocks."""
+    state = _state_with_two_human_messages(
+        prev="vocês têm a Carbon X5?",
+        curr="vocês têm a Carbon X5?",
+    )
+    assert should_block_rerun(state, "recommend", user_msg="vocês têm a Carbon X5?") is True
+
+
+def test_anti_rerun_blocks_query_with_minor_typo():
+    """Same intent with a small typo (ratio ≥ 0.75) → blocks."""
+    state = _state_with_two_human_messages(
+        prev="vocês têm a Carbon X5?",
+        curr="voces tem a Carbon X5?",  # missing accents only
+    )
+    # ratio ≈ 0.91 — still above the 0.75 threshold → blocks.
+    assert should_block_rerun(state, "recommend", user_msg="voces tem a Carbon X5?") is True

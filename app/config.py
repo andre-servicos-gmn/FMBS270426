@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     # Admin
     admin_api_key: str = Field(default="")
 
+    # Sprint 2.7 — RESET_ALLOWED_PHONES: lista separada por vírgula de números
+    # autorizados a usar `/reset` no WhatsApp (formato internacional sem o +,
+    # ex: "5511987654321,5511912345678"). Vazio → /reset DESATIVADO pra todo
+    # mundo. Use em dev/staging; em produção mantenha vazio salvo necessidade.
+    reset_allowed_phones: str = Field(default="")
+
     # Redis
     redis_url: str = Field(default="redis://localhost:6379/0")
     session_ttl_seconds: int = Field(default=86400)
@@ -71,6 +77,10 @@ class Settings(BaseSettings):
     bling_sync_categories: str = Field(default="")
     bling_sync_hour: int = Field(default=4)
     bling_stock_cache_ttl: int = Field(default=300)
+    # Sprint 2.6.3 — in-memory catalog snapshot TTL. Default 60s so a fresh
+    # webhook update propagates to the match layer within a minute without
+    # forcing a Supabase round-trip per inbound WhatsApp message.
+    bling_catalog_cache_ttl: int = Field(default=60)
     # Segredo HMAC do webhook. Vazio em dev → validação desligada (LOG WARNING).
     bling_webhook_secret: str = Field(default="")
 

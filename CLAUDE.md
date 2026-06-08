@@ -218,7 +218,27 @@ Se um teste quebrar, **não pare**: corrija e rode de novo.
 - Decisões de roteamento ficam em `conditional_edges` baseadas em `state["intent"]` (e em flags como `recommended_products` para distinguir primeira recomendação vs follow-up)
 - Checkpointer: hoje `MemorySaver` (in-memory). Sprint 3 troca por `RedisSaver` (langgraph-checkpoint-redis) com namespace por hash do telefone
 
-## Arquitetura do diagnose (Sprint 1.8+)
+## Arquitetura conversacional (Sprint 2.6 — refatoração estratégica)
+
+**Antes (≤ Sprint 2.5):** smalltalk → triage → diagnose (se cliente vago) → recommend → follow-ups.
+**Depois (Sprint 2.6+):** smalltalk → triage → [recommend | price_inquiry | help_request | scheduling_inquiry | product_selection | faq | out_of_scope | smalltalk].
+
+`diagnose` foi **removido do grafo do WhatsApp** porque canibalizava o valor da Consultoria presencial (R$350, abatido na compra). A regra estratégica agora é: o agente atende, responde, vende, convida pra loja. Quando o cliente precisa de orientação profunda, o agente oferece a Consultoria (que é onde o diagnóstico acontece, presencialmente).
+
+**Os 9 intents do triage (Sprint 2.6):**
+- `smalltalk` — cumprimento / nome / mensagens sem intenção comercial
+- `product_inquiry` — pergunta sobre produto específico (estoque, características)
+- `price_inquiry` — pergunta de preço
+- `purchase_intent` — cliente quer comprar
+- `scheduling_inquiry` — quer agendar a Consultoria
+- `out_of_scope` — operacional fora do escopo (entrega, pix)
+- `faq` — horário / localização / garantia
+- `help_request` — pedido de ajuda GENÉRICA sem nomear produto → oferece Consultoria + visita à loja
+- `close` — encerramento ("valeu, depois eu volto")
+
+O arquivo `app/agent/nodes/diagnose.py` foi MANTIDO com docstring `DEPRECATED` — pra possível futura Consultoria virtual. Não importar dele em código ativo.
+
+## Arquitetura do diagnose (Sprint 1.8 — DEPRECATED em 2.6, kept for reference)
 
 O diagnose deixou de ser uma única chamada LLM "open-ended" e passou a ser um state-machine controlado por Python com extração e fraseamento delegados ao LLM. Cada turno passa por **4 fases**:
 

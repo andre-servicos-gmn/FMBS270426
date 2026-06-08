@@ -1,52 +1,42 @@
-"""Sprint 2.0 — qualifier-mode recommend.
+"""Sprint 2.6 — product_inquiry handler.
 
-The Sprint 1.9 two-layer architecture (REFERENCE vs PROFILE) is preserved as
-mode detection, but the SEMANTICS flipped: this node no longer "recommends"
-in the active sense. The agent is now a qualifier whose job is to either:
+The legacy "REFERENCE-SIM / REFERENCE-NÃO / PROFILE" three-mode machine
+existed to navigate around the diagnose node. Sprint 2.6 removed diagnose,
+so this node has exactly one job:
 
-- REFERENCE-SIM: confirm the named racket is in stock and ask whether the
-  customer wants details or to close. NO alternatives — even ones that "would
-  fit better". Customer already chose; respect that.
-- REFERENCE-NÃO: briefly say we don't carry that exact model and offer the
-  Consultoria Base Sports as the path to find the right one for the profile.
-  NO alternatives — listing them undermines the Consultoria pitch.
-- PROFILE: delegate to ``consultoria_offer_node``. The agent never picks a
-  racket for the customer; the Consultoria does (with on-court testing).
+    Customer asked about a product → identify it in the Bling catalog
+    (or fall back to the legacy local catalog), respond with a short
+    confirmation + invite the next step.
 
-``last_recommendation_at`` and ``recommended_products`` are still set in
-REFERENCE-SIM so the follow-up triage state machine (price_inquiry,
-product_selection) can resolve the single product the customer named.
+Two outcomes:
+
+- Product matched in catalog → "Sim, temos a *X*! Quer saber preço,
+  detalhes ou já fechar?" (one block, deterministic).
+- Product NOT matched → "Hmm, não encontrei essa raquete no nosso
+  catálogo. Quer que eu te ajude a achar outra?" (one block).
+
+No LLM call in either path. The node also records ``recommended_products``
+so the subsequent ``price_inquiry`` / ``product_selection`` turns know
+which product is on the table.
 """
-import json
 import logging
 import unicodedata
 from datetime import datetime, timezone
+from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from app.adapters.openai_client import OpenAIClient
 from app.agent.anti_rerun import (
     fallback_message_for,
     should_block_rerun,
     stamp_node_execution,
 )
-from app.agent.message_splitter import parse_messages
 from app.agent.nodes._product_match import match_product_tolerant
-from app.agent.nodes.consultoria_offer import consultoria_offer_node
-from app.agent.prompts import build_recommend_prompt
 from app.agent.state import AgentState
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-_HANDOFF_MARKER = "[HANDOFF]"
-
-# Casual-Brazilian "no preference / no reference" values — in sync with the
-# mapping table in SYSTEM_DIAGNOSE_EXTRACT.
-_EMPTY_MODEL_VALUES = {"", "nenhum", "nenhuma", "none", "null", "nao", "não"}
-
-
-# ── Helpers (re-exported; used by re_recommendation too) ─────────────────────
 
 def _strip_accents(text: str) -> str:
     return "".join(
@@ -54,218 +44,126 @@ def _strip_accents(text: str) -> str:
     )
 
 
-def _normalize_name(s: str) -> str:
-    return _strip_accents((s or "").lower().strip())
-
-
-def _sport_value(profile: dict) -> str | None:
-    raw = profile.get("esporte_praticado") or profile.get("sport")
-    if not raw:
-        return None
-    raw = str(raw).strip().lower()
-    if raw in ("padel", "pala", "pala de padel"):
-        return "padel"
-    return "beach_tennis"
-
-
-def _build_filters(profile: dict) -> dict:
-    """Hard DB filters — always pin category to raquete/pala by sport."""
-    filters: dict = {"min_stock": 1}
-    sport = _sport_value(profile)
-    if sport:
-        filters["sport"] = sport
-    filters["category"] = "pala" if sport == "padel" else "raquete"
-    return filters
-
-
-def _build_query(profile: dict) -> str:
-    parts: list[str] = []
-
-    sport = _sport_value(profile)
-    if sport == "padel":
-        parts.append("pala de padel")
-    else:
-        parts.append("raquete de beach tennis")
-
-    level = profile.get("nivel_jogo") or profile.get("level")
-    if level:
-        parts.append(f"nível {level}")
-
-    prev = profile.get("esporte_raquete_previo")
-    if prev and str(prev).lower() not in ("nenhum", "nao_aplicavel", "nao", "não", ""):
-        parts.append(f"compatível com jogador de {prev}")
-
-    return " ".join(parts)
-
-
-def _has_model_reference(profile: dict) -> bool:
-    raw = profile.get("modelo_desejado")
-    if not raw:
-        return False
-    return _strip_accents(str(raw).lower().strip()) not in _EMPTY_MODEL_VALUES
-
-
-def _find_name_match(products: list[dict], requested: str) -> dict | None:
-    """Delegates to match_product_tolerant (Sprint 1.15)."""
-    if not requested or not products:
-        return None
-    return match_product_tolerant(requested, products).product
-
-
-def _get_lesion(profile: dict) -> str | None:
-    region = profile.get("regiao_lesao")
-    if not region:
-        return None
-    norm = _strip_accents(str(region).lower().strip())
-    if norm in ("nenhuma", "nenhum", "none", ""):
-        return None
-    return norm
-
-
-def _format_products_for_context(products: list[dict]) -> str:
-    if not products:
-        return "(nenhum produto encontrado no momento)"
-    return "\n".join(
-        f"- {p['name']}: R${int(p['price_cents']) / 100:.0f}"
-        f" | {(p.get('description') or '')[:120]}"
-        for p in products
-    )
-
-
-# ── REFERENCE search ─────────────────────────────────────────────────────────
-
-async def _search_reference(profile: dict, modelo: str) -> tuple[dict | None, list[dict]]:
-    """Search the catalog by the named model; return (matched_product, raw_candidates).
-
-    Sprint 2.5 — when the Bling integration is wired (``BLING_CLIENT_ID``
-    populated), we query ``bling_products`` directly. Otherwise we fall back
-    to the legacy embedding-based ``search_products`` so existing tests + the
-    pre-Bling pilot keep working unchanged.
+async def _list_catalog_candidates(last_text: str) -> list[dict[str, Any]]:
+    """Resolve the candidate product list. Sprint 2.6.3 — Bling path now
+    goes through the in-memory ``CatalogCache`` (full catalog, no LIMIT 200
+    cap) instead of hitting Supabase per inbound message. Legacy local
+    catalog path is preserved for dev / Bling-off mode.
     """
     settings = get_settings()
     if settings.bling_client_id:
-        from app.sync.bling_repo import fetch_product_by_name, list_active_products
         try:
-            candidates = await fetch_product_by_name(modelo)
-            if not candidates:
-                candidates = await list_active_products(limit=200)
+            from app.sync.bling_catalog_cache import get_catalog_snapshot
+            snapshot = await get_catalog_snapshot()
+            return list(snapshot)
         except Exception as exc:
             logger.warning("recommend_bling_lookup_failed: %s", exc)
-            candidates = []
-        matched = _find_name_match(candidates, modelo)
-        return matched, candidates
+            return []
 
-    from app.rag.retriever import search_products
-    from app.storage.db import get_session
-
-    filters = _build_filters(profile)
-    sport = _sport_value(profile) or "beach_tennis"
-    query = f"raquete {modelo} {sport.replace('_', ' ')}"
-
+    # Legacy path — local catalog via embedding search.
     try:
+        from app.rag.retriever import search_products
+        from app.storage.db import get_session
         async with get_session() as session:
-            candidates = await search_products(session, query, filters, k=5)
+            return await search_products(session, last_text, {"min_stock": 1}, k=5)
     except Exception as exc:
-        logger.warning("recommend_reference_retrieval_failed: %s", exc)
-        candidates = []
-
-    matched = _find_name_match(candidates, modelo)
-    return matched, candidates
+        logger.warning("recommend_local_lookup_failed: %s", exc)
+        return []
 
 
-def _build_reference_sim_context(
-    profile: dict, customer_name: str | None, matched: dict
-) -> str:
-    name_line = f"Nome do cliente: {customer_name}\n" if customer_name else ""
+def _confirmation_text(matched: dict[str, Any]) -> str:
+    """Sprint 2.6.1 / 2.6.4 — consultive tone, neutral noun.
+
+    The 2.6.1 closing kept "ou já quer fechar?" out (purchase vocabulary
+    reserved for explicit ``purchase_intent``). 2.6.4 replaces the
+    "raquete" hard-coded fallback name with a neutral one so a customer
+    asking about a non-racket product (sock, manguito, kit, etc.) doesn't
+    see "Sim, temos a essa raquete!".
+    """
+    name = matched.get("name", "esse produto")
     return (
-        f"{name_line}"
-        f"Modo: REFERENCE-SIM\n"
-        f"Modelo solicitado pelo cliente: {matched.get('name')}\n"
-        f"Status: TEMOS NO ESTOQUE\n\n"
-        f"Perfil do cliente: {json.dumps(profile, ensure_ascii=False)}\n\n"
-        f"Produto confirmado:\n{_format_products_for_context([matched])}"
+        f"Sim, temos a *{name}*! Posso te passar mais detalhes, ou "
+        f"prefere ver pessoalmente na loja?"
     )
 
 
-def _build_reference_nao_context(
-    profile: dict, customer_name: str | None, modelo_solicitado: str
-) -> str:
-    settings = get_settings()
-    preco = getattr(settings, "consultoria_preco", 350)
-    name_line = f"Nome do cliente: {customer_name}\n" if customer_name else ""
+def _not_found_text(query: str) -> str:
+    """Sprint 2.6.2 / 2.6.4 — neutral "not found" wording.
+
+    Replaces "essa raquete" → "esse produto" so the line works for socks,
+    manguitos, kits, etc. — the agent doesn't blow its cover when the
+    customer asked about non-racket items.
+    """
     return (
-        f"{name_line}"
-        f"Modo: REFERENCE-NÃO\n"
-        f"Modelo solicitado pelo cliente: {modelo_solicitado}\n"
-        f"Status: NÃO TEMOS NO CATÁLOGO\n\n"
-        f"Perfil do cliente: {json.dumps(profile, ensure_ascii=False)}\n\n"
-        f"Investimento da Consultoria: R$ {preco} (100% abatido na compra "
-        f"de raquete no mesmo dia)."
+        "Hmm, não encontrei esse produto no nosso catálogo. "
+        "Quer que eu te ajude a achar outro?"
     )
 
 
-# ── Fallback messages (used when the LLM returns empty) ──────────────────────
+def _ambiguous_text(candidates: list[dict[str, Any]]) -> str:
+    """Sprint 2.6.4 — render the ambiguous-list confirmation.
 
-def _fallback_reference_sim(matched: dict) -> list[str]:
-    name = matched.get("name", "essa raquete")
-    return [
-        f"Sim, temos a *{name}* aqui!",
-        "Quer saber mais detalhes (preço, peso, indicação) ou já quer fechar?",
-    ]
-
-
-def _fallback_reference_nao(modelo: str) -> list[str]:
-    settings = get_settings()
-    preco = getattr(settings, "consultoria_preco", 350)
-    return [
-        f"A *{modelo}* específica a gente não tem no catálogo agora.",
-        (
-            f"Pra encontrar a raquete que realmente combina com seu jogo, "
-            f"a gente prefere fazer com a *Consultoria Base Sports* — análise "
-            f"do seu perfil + teste em quadra. Investimento de *R$ {preco}*, "
-            f"100% abatido se comprar no mesmo dia."
-        ),
-        "Quer saber como funciona ou já agendar?",
-    ]
+    Up to 3 candidates listed by bold name. The closing question is kept
+    open ("Qual você procura?") so the customer can reply with name,
+    position, or — for the multi-product price case (Sprint 2.6.4) —
+    "as duas" / "ambas" / "todos".
+    """
+    names = [c.get("name", "") for c in candidates[:3] if c.get("name")]
+    if len(names) >= 2:
+        bulleted = "\n".join(f"• *{n}*" for n in names)
+        return (
+            "Temos algumas opções parecidas:\n"
+            f"{bulleted}\n"
+            "\n"
+            "Qual você procura?"
+        )
+    if names:
+        return f"Você quis dizer a *{names[0]}*?"
+    return _not_found_text("")
 
 
-# Sprint 2.1 — deterministic single-block replies for cliente determinado.
-# No LLM, no bullets, no "qual delas". Frase natural com negrito no nome.
-
-def _determined_reference_sim_text(matched: dict) -> str:
-    name = matched.get("name", "essa raquete")
+def _fallback_top3_text(candidates: list[dict[str, Any]]) -> str:
+    """Sprint 2.6.4 — when match returns ``none`` but the top candidates
+    share at least one distinctive token with the query, offer them as a
+    soft fallback instead of just "não encontrei"."""
+    names = [c.get("name", "") for c in candidates[:3] if c.get("name")]
+    bulleted = "\n".join(f"• *{n}*" for n in names)
     return (
-        f"Sim, temos a *{name}*! Quer saber preço, peso, ou tem alguma "
-        f"dúvida específica?"
+        "Não encontrei exatamente isso, mas tenho modelos parecidos:\n"
+        f"{bulleted}\n"
+        "\n"
+        "Algum desses é o que você procura?"
     )
 
 
-def _determined_reference_nao_text(modelo: str) -> str:
-    """Sprint 2.4 — REFERENCE-NÃO determined now offers to look for
-    alternatives instead of jumping straight into the Consultoria pitch.
-    The agent asks; if the customer agrees, triage flips them to exploring
-    and diagnose runs next turn."""
-    return (
-        f"Infelizmente não temos a *{modelo}* em estoque no momento. "
-        f"Posso te ajudar a ver outras opções que combinem com seu jogo?"
-    )
+def _candidates_share_tokens_with_query(
+    query: str, candidates: list[dict[str, Any]]
+) -> bool:
+    """Did any top candidate share ≥1 distinctive token with the query?"""
+    from app.agent.nodes._product_match import _distinctive_tokens, _tokenize
 
+    q_tokens = _distinctive_tokens(query)
+    if not q_tokens:
+        return False
+    for c in candidates:
+        name_tokens = set(_tokenize(c.get("name") or ""))
+        if q_tokens & name_tokens:
+            return True
+    return False
 
-# ── Orchestrator ─────────────────────────────────────────────────────────────
 
 async def recommend_node(state: AgentState) -> dict:
-    profile = dict(state.get("player_profile") or {})
-    customer_name = state.get("customer_name")
     messages = state.get("messages") or []
-
-    # Anti-rerun guard (unchanged from Sprint 1.14).
     last_human = next(
         (m for m in reversed(messages) if isinstance(m, HumanMessage)), None
     )
-    last_msg = (
+    last_text = (
         last_human.content if last_human and isinstance(last_human.content, str) else ""
     )
-    if should_block_rerun(state, "recommend", last_msg):
+
+    # Anti-rerun guard — guards against the customer repeating the same
+    # short follow-up within 60s.
+    if should_block_rerun(state, "recommend", last_text):
         fallback = fallback_message_for("recommend")
         logger.info(
             "recommend_blocked_by_anti_rerun phone_hash=%.8s",
@@ -277,120 +175,125 @@ async def recommend_node(state: AgentState) -> dict:
             **stamp_node_execution("recommend"),
         }
 
-    # ── PROFILE mode → delegate to consultoria_offer_node ────────────────────
-    if not _has_model_reference(profile):
-        logger.info("recommend mode=PROFILE delegating_to=consultoria_offer")
-        offer_result = await consultoria_offer_node(state)
-        # Stamp execution so anti-rerun applies to the next turn too.
-        offer_result.update(stamp_node_execution("recommend"))
-        return offer_result
-
-    # ── REFERENCE mode ───────────────────────────────────────────────────────
-    modelo = str(profile.get("modelo_desejado") or "").strip()
-    matched, _ = await _search_reference(profile, modelo)
-    is_sim = matched is not None
-    mode = "REFERENCE-SIM" if is_sim else "REFERENCE-NÃO"
-    is_determined = state.get("customer_intent_path") == "determined"
-
-    # Sprint 2.1 — cliente determinado: deterministic single-block reply,
-    # no diagnose needed, no LLM call. Subtle Consultoria pitch is appended
-    # ONCE per conversation for REFERENCE-SIM (NÃO already mentions it).
-    if is_determined:
-        extra: dict = {}
-        if is_sim:
-            assert matched is not None  # is_sim guarantees a matched product
-            # Sprint 2.4 — stock confirmation is pitch-free by design. The
-            # subtle pitch only fires on PRICE / FITNESS / COMFORT or on the
-            # 2nd+ technical question (DELAYED types).
-            blocks = [_determined_reference_sim_text(matched)]
-        else:
-            # Sprint 2.4 — ask whether the customer wants alternatives;
-            # flag is read by triage next turn to handle sim/não.
-            blocks = [_determined_reference_nao_text(modelo)]
-            extra["awaiting_alternatives_decision"] = True
-
-        joined = "\n\n".join(blocks)
+    # Sprint 2.6.2 — confirmation flow: the previous turn asked "Você quis
+    # dizer X?". Triage routes us back here when the customer answered yes;
+    # we promote the stashed candidate to an active match and emit the
+    # standard confirmation message.
+    pending = state.get("awaiting_match_confirmation")
+    if pending:
+        text = _confirmation_text(pending)
         logger.info(
-            "recommend done mode=%s matched=%s path=determined blocks=%d",
-            mode, (matched or {}).get("name"), len(blocks),
+            "recommend confirmation_resolved product=%s "
+            "awaiting_detail_choice=True",
+            pending.get("name"),
         )
-
-        result: dict = {
-            "messages": [AIMessage(content=joined)],
-            "response_blocks": blocks,
-            "produto_pesquisado": modelo,
+        return {
+            "messages": [AIMessage(content=text)],
+            "response_blocks": [text],
+            "recommended_products": [pending],
+            "last_recommendation_at": datetime.now(timezone.utc).isoformat(),
+            "produto_pesquisado": pending.get("name"),
+            "awaiting_match_confirmation": None,
+            # Sprint 2.6.10 — confirmation_text ends with "Posso te passar
+            # mais detalhes, ou prefere ver pessoalmente na loja?". The next
+            # turn must read this flag in triage and short-circuit "detalhes"
+            # / "sim" / "manda" → attribute_inquiry (NOT help_request).
+            "awaiting_detail_choice": True,
             **stamp_node_execution("recommend"),
-            **extra,
         }
-        if is_sim:
-            assert matched is not None
-            result["recommended_products"] = [matched]
-            result["last_recommendation_at"] = datetime.now(timezone.utc).isoformat()
-        else:
-            result["recommended_products"] = []
-        return result
 
-    # ── Exploring / unknown path — go through the LLM phrasing pipeline ─────
-    if is_sim:
-        assert matched is not None
-        context = _build_reference_sim_context(profile, customer_name, matched)
-    else:
-        context = _build_reference_nao_context(profile, customer_name, modelo)
+    candidates = await _list_catalog_candidates(last_text)
+    match = match_product_tolerant(last_text, candidates) if candidates else None
 
-    settings = get_settings()
-    system = build_recommend_prompt(settings)
+    if match is None or match.status == "none":
+        # Sprint 2.6.4 — when the matcher gives up but the top-3 candidates
+        # share at least one distinctive token with the query, offer them
+        # as a soft fallback (recovery) instead of "não encontrei". This
+        # rescues queries where the customer paraphrases the product
+        # ("kit bolinhas" → "Bola Beach Tennis ... Com 72 Bolinhas").
+        top3 = (match.candidates if match else None) or []
+        if top3 and _candidates_share_tokens_with_query(last_text, top3):
+            text = _fallback_top3_text(top3)
+            logger.info(
+                "recommend not_matched_with_fallback query=%r n_candidates=%d",
+                last_text[:80], len(top3),
+            )
+            return {
+                "messages": [AIMessage(content=text)],
+                "response_blocks": [text],
+                "recommended_products": [],
+                "last_product_candidates": top3,
+                **stamp_node_execution("recommend"),
+            }
 
-    client = OpenAIClient()
-    response = await client.chat(
-        messages=[{"role": "user", "content": context}],
-        system=system,
-        max_tokens=600,
-        temperature=0.5,
-        json_mode=True,
-    )
+        text = _not_found_text(last_text)
+        logger.info("recommend not_matched query=%r", last_text[:80])
+        return {
+            "messages": [AIMessage(content=text)],
+            "response_blocks": [text],
+            "recommended_products": [],
+            "last_product_candidates": None,
+            **stamp_node_execution("recommend"),
+        }
 
-    blocks = parse_messages(response)
-    needs_handoff = any(_HANDOFF_MARKER in b for b in blocks)
-    blocks = [b.replace(_HANDOFF_MARKER, "").strip() for b in blocks]
-    blocks = [b for b in blocks if b]
+    if match.status in ("exact", "fuzzy_high"):
+        matched = match.product
+        assert matched is not None  # status guarantees product is set
+        text = _confirmation_text(matched)
+        logger.info(
+            "recommend matched product=%s status=%s "
+            "awaiting_detail_choice=True",
+            matched.get("name"), match.status,
+        )
+        return {
+            "messages": [AIMessage(content=text)],
+            "response_blocks": [text],
+            "recommended_products": [matched],
+            "last_recommendation_at": datetime.now(timezone.utc).isoformat(),
+            "produto_pesquisado": matched.get("name"),
+            "last_product_candidates": None,
+            # Sprint 2.6.10 — see comment in the confirmation_resolved branch.
+            "awaiting_detail_choice": True,
+            **stamp_node_execution("recommend"),
+        }
 
-    # Defensive fallbacks — keep UX intact if LLM returns empty.
-    if not blocks:
-        if is_sim:
-            assert matched is not None
-            blocks = _fallback_reference_sim(matched)
-        else:
-            blocks = _fallback_reference_nao(modelo)
-        logger.warning("recommend fallback_used mode=%s", mode)
+    if match.status == "fuzzy_low":
+        candidate = match.product
+        assert candidate is not None
+        name = candidate.get("name", "esse produto")
+        text = f"Você quis dizer a *{name}*?"
+        logger.info(
+            "recommend confirmation_pending candidate=%s distance=%s",
+            name, match.distance,
+        )
+        return {
+            "messages": [AIMessage(content=text)],
+            "response_blocks": [text],
+            "awaiting_match_confirmation": candidate,
+            **stamp_node_execution("recommend"),
+        }
 
-    joined = "\n\n".join(blocks)
+    if match.status == "ambiguous":
+        candidates = list(match.candidates or [])
+        text = _ambiguous_text(candidates)
+        logger.info(
+            "recommend ambiguous n_candidates=%d", len(candidates),
+        )
+        return {
+            "messages": [AIMessage(content=text)],
+            "response_blocks": [text],
+            # Sprint 2.6.4 — stash candidates so price_inquiry / triage can
+            # resolve "as duas" / "ambas" / "o segundo" on the next turn.
+            "last_product_candidates": candidates,
+            **stamp_node_execution("recommend"),
+        }
 
-    logger.info(
-        "recommend done mode=%s matched=%s blocks=%d handoff=%s",
-        mode, (matched or {}).get("name"), len(blocks), needs_handoff,
-    )
-
-    result: dict = {
-        "messages": [AIMessage(content=joined)],
-        "response_blocks": blocks,
-        "produto_pesquisado": modelo,
+    # Defensive — unknown status falls through to "not found".
+    text = _not_found_text(last_text)
+    return {
+        "messages": [AIMessage(content=text)],
+        "response_blocks": [text],
+        "recommended_products": [],
+        "last_product_candidates": None,
         **stamp_node_execution("recommend"),
     }
-
-    if is_sim:
-        # Only REFERENCE-SIM keeps a shortlist — the named product is the
-        # active racket on the table for follow-up intents.
-        assert matched is not None
-        result["recommended_products"] = [matched]
-        result["last_recommendation_at"] = datetime.now(timezone.utc).isoformat()
-    else:
-        # REFERENCE-NÃO is a Consultoria pivot — flip the interest flag for
-        # later dossier rendering and clear any stale shortlist.
-        result["consultoria_interest"] = True
-        result["recommended_products"] = []
-
-    if needs_handoff:
-        result["needs_handoff"] = True
-        result["handoff_reason"] = "recommend_no_match"
-
-    return result

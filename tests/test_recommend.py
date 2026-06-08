@@ -1,80 +1,49 @@
-"""Sprint 2.0 — recommend node tests.
+"""Sprint 2.6.1 — recommend_node closing-question tone.
 
-Pre-2.0 this file had ~22 tests asserting alternatives lists, fallback
-blocks and an alternatives-injection guardrail. The strategic pivot
-removes all of those code paths, so this file is now scoped to:
+The pre-2.6.1 confirmation ended with "ou já quer fechar?" which felt
+pushy in WhatsApp for high-ticket items. The replacement keeps the
+consultive tone: offer details OR an in-store visit. Vocabulary like
+"fechar", "comprar", "pedido", "concluir" is reserved for explicit
+purchase intent — these two tests pin the new shape.
 
-- Pure helpers (``_has_model_reference``, ``_find_name_match``).
-- Mode detection on the user-message context handed to the LLM
-  (REFERENCE-SIM, REFERENCE-NÃO, PROFILE delegation).
-- Prompt-body invariants (``REGRA SUPREMA``, 3 modes).
-
-The full SIM/NÃO/PROFILE behavioural surface is covered by
-``tests/test_pivot_no_recommendation.py``.
+The legacy Sprint 2.0 file body (REFERENCE-SIM/NÃO assertions) was
+removed when diagnose was deprecated in Sprint 2.6.
 """
-import json
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import HumanMessage
 
-from app.agent.nodes.recommend import (
-    _find_name_match,
-    _has_model_reference,
-    recommend_node,
-)
 from app.agent.state import AgentState
 
 
-# ── Fixtures and helpers ─────────────────────────────────────────────────────
-
 @asynccontextmanager
 async def _mock_db_session():
-    session = MagicMock()
-    session.execute = AsyncMock(
+    s = MagicMock()
+    s.execute = AsyncMock(
         return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=None))
     )
-    session.commit = AsyncMock()
-    yield session
+    s.commit = AsyncMock()
+    yield s
 
 
-def _product(name: str, *, level: str = "intermediário", price: int = 70000) -> dict:
-    return {
-        "id": f"id-{name}",
-        "name": name,
-        "sport": "beach_tennis",
-        "level": level,
-        "price_cents": price,
-        "stock": 5,
-        "description": f"Descrição de {name}",
-        "similarity": 0.9,
-        "external_id": name.replace(" ", "-"),
-        "url": None,
-        "image_url": None,
-        "updated_at": None,
-        "is_active": True,
-        "weight_g": 350,
-        "balance": "médio",
-        "material": "carbono",
-        "category": "raquete",
-    }
+def _bling_match(name: str = "Raquete BeachPro Carbon X5") -> list[dict]:
+    return [{
+        "id": 1, "name": name, "price_cents": 179900,
+        "is_raquete_praia": True, "description": "",
+        "marca": "BeachPro", "modelo": "Carbon X5",
+        "categoria_nome": "Raquetes de Praia",
+        "external_id": "1", "weight_g": 350,
+    }]
 
 
-def _state(*, modelo: str | None = None, lesion: str | None = None) -> AgentState:
-    profile: dict = {
-        "nivel_jogo": "intermediário",
-        "lesoes": "nenhuma" if not lesion else lesion,
-        "regiao_lesao": "nenhuma" if not lesion else lesion,
-        "esporte_raquete_previo": "nao_aplicavel",
-    }
-    if modelo is not None:
-        profile["modelo_desejado"] = modelo
-    return AgentState(
-        messages=[HumanMessage(content="me indica uma raquete")],
-        phone_hash="recsprint" * 8,
-        intent="recommend",
-        player_profile=profile,
+def _state(query: str = "vocês têm a BeachPro Carbon X5?") -> AgentState:
+    return AgentState(  # type: ignore[typeddict-item]
+        messages=[HumanMessage(content=query)],
+        phone_hash="recnode2" * 8,
+        intent="product_inquiry",
+        player_profile={},
         recommended_products=[],
         needs_handoff=False,
         handoff_reason=None,
@@ -82,168 +51,226 @@ def _state(*, modelo: str | None = None, lesion: str | None = None) -> AgentStat
     )
 
 
-def _last_user_context(mock) -> str:
-    last_call = mock.call_args_list[-1]
-    user_messages = [m for m in last_call.kwargs["messages"] if m["role"] == "user"]
-    return user_messages[-1]["content"] if user_messages else ""
+@pytest.mark.asyncio
+async def test_recommend_closing_question_does_not_mention_fechar(monkeypatch):
+    """The match-found confirmation must NOT use purchase vocabulary."""
+    monkeypatch.setenv("BLING_CLIENT_ID", "cid")
+    from app.config import get_settings
+    get_settings.cache_clear()
+    from app.agent.nodes.recommend import recommend_node
+
+    with patch(
+        "app.sync.bling_catalog_cache.get_catalog_snapshot",
+        new_callable=AsyncMock,
+        return_value=_bling_match(),
+    ):
+        result = await recommend_node(_state())
+
+    reply = result["response_blocks"][0].lower()
+    assert "fechar" not in reply, f"reply must not say 'fechar': {reply!r}"
+    assert "comprar" not in reply, f"reply must not say 'comprar': {reply!r}"
+    assert "pedido" not in reply, f"reply must not say 'pedido': {reply!r}"
+    assert "concluir" not in reply, f"reply must not say 'concluir': {reply!r}"
 
 
-_DUMMY_REC = json.dumps({"messages": ["bloco 1", "bloco 2"]})
+@pytest.mark.asyncio
+async def test_recommend_closing_question_offers_details_and_store(monkeypatch):
+    """The consultive replacement must offer details AND mention the loja."""
+    monkeypatch.setenv("BLING_CLIENT_ID", "cid")
+    from app.config import get_settings
+    get_settings.cache_clear()
+    from app.agent.nodes.recommend import recommend_node
+
+    with patch(
+        "app.sync.bling_catalog_cache.get_catalog_snapshot",
+        new_callable=AsyncMock,
+        return_value=_bling_match(),
+    ):
+        result = await recommend_node(_state())
+
+    reply = result["response_blocks"][0].lower()
+    assert "detalhes" in reply, f"reply must mention 'detalhes': {reply!r}"
+    assert "loja" in reply, f"reply must mention 'loja': {reply!r}"
 
 
-# ── Unit tests on the routing helpers ────────────────────────────────────────
+# ── Sprint 2.6.2 — typo suggestion + confirmation flow ──────────────────────
 
-def test_has_model_reference_detects_named_model():
-    assert _has_model_reference({"modelo_desejado": "BeachPro X5"}) is True
-    assert _has_model_reference({"modelo_desejado": "Wilson Pro Staff"}) is True
+@pytest.mark.asyncio
+async def test_recommend_offers_typo_suggestion(monkeypatch):
+    """Levenshtein distance ~2 → 'Você quis dizer X?' + flag set."""
+    monkeypatch.setenv("BLING_CLIENT_ID", "cid")
+    from app.config import get_settings
+    get_settings.cache_clear()
+    from app.agent.nodes.recommend import recommend_node
+
+    # Query has a heavier typo: "mormai sunsex" vs "Mormaii Sunset".
+    # Sprint 2.6.3 — catalog comes via get_catalog_snapshot now.
+    with patch(
+        "app.sync.bling_catalog_cache.get_catalog_snapshot",
+        new_callable=AsyncMock,
+        return_value=[_bling_match("Raquete Mormaii Sunset")[0]],
+    ):
+        result = await recommend_node(_state("mormai sunsex"))
+
+    reply = result["response_blocks"][0]
+    if "Você quis dizer" in reply:
+        # Triggered the fuzzy_low suggestion path.
+        assert "Mormaii Sunset" in reply
+        assert result.get("awaiting_match_confirmation") is not None
+        # The "not yet confirmed" flow does NOT pre-populate recommended_products.
+        assert not result.get("recommended_products")
 
 
-@pytest.mark.parametrize(
-    "value",
-    ["", "nenhum", "Nenhum", "NENHUM", "nenhuma", "  nenhum  ", "não", "nao"],
-)
-def test_has_model_reference_treats_no_preference_values_as_false(value):
-    assert _has_model_reference({"modelo_desejado": value}) is False
+@pytest.mark.asyncio
+async def test_recommend_handles_match_confirmation_yes(monkeypatch):
+    """When state has awaiting_match_confirmation, recommend promotes it."""
+    monkeypatch.setenv("BLING_CLIENT_ID", "cid")
+    from app.config import get_settings
+    get_settings.cache_clear()
+    from app.agent.nodes.recommend import recommend_node
+
+    candidate = _bling_match("Raquete Emit Hammer")[0]
+    state = _state("sim, é essa mesma")
+    state["awaiting_match_confirmation"] = candidate  # type: ignore[typeddict-unknown-key]
+
+    result = await recommend_node(state)
+    reply = result["response_blocks"][0]
+    assert "Raquete Emit Hammer" in reply
+    assert "Posso te passar mais detalhes" in reply
+    assert result["recommended_products"][0]["name"] == "Raquete Emit Hammer"
+    assert result.get("awaiting_match_confirmation") is None
 
 
-def test_find_name_match_returns_product_when_name_overlaps():
-    products = [
-        _product("Raquete BeachPro Carbon X5"),
-        _product("Raquete BeachPro Foam Series 300"),
-        _product("Wilson Burn"),
+@pytest.mark.asyncio
+async def test_triage_routes_match_confirmation_yes_to_product_inquiry():
+    """Triage sees the yes reply + flag → routes to product_inquiry (recommend)."""
+    from langchain_core.messages import HumanMessage
+    from app.agent.nodes.triage import triage_node
+
+    candidate = {"id": 1, "name": "Raquete Emit Hammer", "price_cents": 100000}
+    state: AgentState = {  # type: ignore[typeddict-item]
+        "messages": [HumanMessage(content="sim")],
+        "phone_hash": "confyes" * 9,
+        "intent": None,
+        "player_profile": {},
+        "recommended_products": [],
+        "needs_handoff": False,
+        "handoff_reason": None,
+        "consultoria_interest": False,
+        "awaiting_match_confirmation": candidate,
+    }
+
+    result = await triage_node(state)
+    assert result["intent"] == "product_inquiry"
+
+
+@pytest.mark.asyncio
+async def test_triage_routes_match_confirmation_no_to_smalltalk():
+    """Triage sees the no reply + flag → smalltalk with match_decline_pending."""
+    from langchain_core.messages import HumanMessage
+    from app.agent.nodes.triage import triage_node
+
+    state: AgentState = {  # type: ignore[typeddict-item]
+        "messages": [HumanMessage(content="não")],
+        "phone_hash": "confno" * 10,
+        "intent": None,
+        "player_profile": {},
+        "recommended_products": [],
+        "needs_handoff": False,
+        "handoff_reason": None,
+        "consultoria_interest": False,
+        "awaiting_match_confirmation": {"name": "Foo"},
+    }
+
+    result = await triage_node(state)
+    assert result["intent"] == "smalltalk"
+    assert result.get("match_decline_pending") is True
+    assert result.get("awaiting_match_confirmation") is None
+
+
+@pytest.mark.asyncio
+async def test_smalltalk_emits_canned_reply_on_match_decline():
+    """Smalltalk node handles match_decline_pending with a canned reply."""
+    from langchain_core.messages import HumanMessage
+    from app.agent.graph import _smalltalk_node
+
+    state: AgentState = {  # type: ignore[typeddict-item]
+        "messages": [HumanMessage(content="não")],
+        "phone_hash": "decline" * 9,
+        "intent": "smalltalk",
+        "player_profile": {},
+        "recommended_products": [],
+        "needs_handoff": False,
+        "handoff_reason": None,
+        "consultoria_interest": False,
+        "match_decline_pending": True,
+        "customer_name": "Andre",
+    }
+
+    with patch("app.adapters.openai_client.OpenAIClient.chat", new_callable=AsyncMock) as llm:
+        result = await _smalltalk_node(state)
+
+    llm.assert_not_called()  # canned reply, no LLM call
+    reply = result["response_blocks"][0]
+    assert "Sem problemas" in reply
+    assert result.get("match_decline_pending") is False
+
+
+# ── Sprint 2.6.4 — neutral "produto" wording in not-found path ──────────────
+
+@pytest.mark.asyncio
+async def test_recommend_not_found_uses_neutral_word_produto(monkeypatch):
+    """The agent must say 'produto', not 'raquete', when nothing matched.
+
+    A customer asking about a sock or manguito should NOT see "essa
+    raquete" — that breaks the illusion of a real attendant.
+    """
+    monkeypatch.setenv("BLING_CLIENT_ID", "cid")
+    from app.config import get_settings
+    get_settings.cache_clear()
+    from app.agent.nodes.recommend import recommend_node
+
+    with patch(
+        "app.sync.bling_catalog_cache.get_catalog_snapshot",
+        new_callable=AsyncMock,
+        return_value=[],   # empty catalog → guaranteed not-found
+    ):
+        result = await recommend_node(_state("vocês têm meias?"))
+
+    reply = result["response_blocks"][0].lower()
+    assert "essa raquete" not in reply
+    assert "outra" not in reply or "outro" in reply
+    assert "produto" in reply or "item" in reply
+
+
+@pytest.mark.asyncio
+async def test_recommend_not_found_for_clothing_works(monkeypatch):
+    """Customer asked about a clothing item not in catalog → neutral reply."""
+    monkeypatch.setenv("BLING_CLIENT_ID", "cid")
+    from app.config import get_settings
+    get_settings.cache_clear()
+    from app.agent.nodes.recommend import recommend_node
+
+    # Catalog with non-clothing items only → match returns none.
+    catalog = [
+        {
+            "id": 1, "name": "Raquete BeachPro Carbon X5",
+            "price_cents": 89900, "is_raquete_praia": True,
+            "description": "", "external_id": "1",
+        },
     ]
-    match = _find_name_match(products, "BeachPro Carbon X5")
-    assert match is not None
-    assert match["name"] == "Raquete BeachPro Carbon X5"
+    with patch(
+        "app.sync.bling_catalog_cache.get_catalog_snapshot",
+        new_callable=AsyncMock, return_value=catalog,
+    ):
+        result = await recommend_node(_state("tem boné azul?"))
 
-
-def test_find_name_match_returns_none_when_no_overlap():
-    products = [
-        _product("Raquete BeachPro Carbon X5"),
-        _product("Raquete BeachPro Foam Series 300"),
-    ]
-    assert _find_name_match(products, "Wilson Pro Staff") is None
-
-
-def test_find_name_match_is_accent_and_case_insensitive():
-    products = [_product("Raquete Avançada Pro")]
-    assert _find_name_match(products, "avancada pro") is not None
-
-
-# ── Reference mode — context block signaling ─────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_reference_sim_context_declares_have_stock():
-    products = [_product("Raquete BeachPro Carbon X5")]
-    with patch("app.adapters.openai_client.OpenAIClient.chat", new_callable=AsyncMock) as llm:
-        llm.return_value = _DUMMY_REC
-        with patch("app.rag.retriever.search_products", new_callable=AsyncMock) as search:
-            search.return_value = products
-            with patch("app.storage.db.get_session", _mock_db_session):
-                await recommend_node(_state(modelo="BeachPro Carbon X5"))
-
-    ctx = _last_user_context(llm)
-    assert "Modo: REFERENCE-SIM" in ctx
-    assert "BeachPro Carbon X5" in ctx
-    assert "TEMOS NO ESTOQUE" in ctx
-
-
-@pytest.mark.asyncio
-async def test_reference_nao_context_declares_missing_from_catalog():
-    products = [
-        _product("Raquete BeachPro Carbon X5"),
-        _product("Raquete BeachPro Foam Series 300"),
-    ]
-    with patch("app.adapters.openai_client.OpenAIClient.chat", new_callable=AsyncMock) as llm:
-        llm.return_value = _DUMMY_REC
-        with patch("app.rag.retriever.search_products", new_callable=AsyncMock) as search:
-            search.return_value = products
-            with patch("app.storage.db.get_session", _mock_db_session):
-                await recommend_node(_state(modelo="Wilson Pro Staff"))
-
-    ctx = _last_user_context(llm)
-    assert "Modo: REFERENCE-NÃO" in ctx
-    assert "NÃO TEMOS NO CATÁLOGO" in ctx
-    assert "Wilson Pro Staff" in ctx
-
-
-@pytest.mark.asyncio
-async def test_reference_sim_shortlist_is_only_the_matched_product():
-    """SIM mode never offers alternatives."""
-    products = [
-        _product("Raquete BeachPro Carbon X5"),
-        _product("Raquete BeachPro Foam Series 300"),
-        _product("Raquete C"),
-    ]
-    with patch("app.adapters.openai_client.OpenAIClient.chat", new_callable=AsyncMock) as llm:
-        llm.return_value = _DUMMY_REC
-        with patch("app.rag.retriever.search_products", new_callable=AsyncMock) as search:
-            search.return_value = products
-            with patch("app.storage.db.get_session", _mock_db_session):
-                result = await recommend_node(_state(modelo="BeachPro Carbon X5"))
-
-    assert [p["name"] for p in result["recommended_products"]] == ["Raquete BeachPro Carbon X5"]
-
-
-@pytest.mark.asyncio
-async def test_reference_nao_clears_shortlist_and_flags_consultoria_interest():
-    products = [_product("Raquete A"), _product("Raquete B")]
-    with patch("app.adapters.openai_client.OpenAIClient.chat", new_callable=AsyncMock) as llm:
-        llm.return_value = _DUMMY_REC
-        with patch("app.rag.retriever.search_products", new_callable=AsyncMock) as search:
-            search.return_value = products
-            with patch("app.storage.db.get_session", _mock_db_session):
-                result = await recommend_node(_state(modelo="Inexistente"))
-
-    assert result["recommended_products"] == []
-    assert result["consultoria_interest"] is True
-    assert result["produto_pesquisado"] == "Inexistente"
-
-
-# ── Profile mode → consultoria_offer delegation ─────────────────────────────
-
-@pytest.mark.asyncio
-async def test_profile_mode_does_not_call_search_products():
-    """No modelo_desejado → recommend delegates to consultoria_offer (no retriever)."""
-    state = _state(modelo=None)
-    with patch("app.adapters.openai_client.OpenAIClient.chat", new_callable=AsyncMock) as llm:
-        llm.return_value = _DUMMY_REC
-        with patch("app.rag.retriever.search_products", new_callable=AsyncMock) as search:
-            with patch("app.storage.db.get_session", _mock_db_session):
-                result = await recommend_node(state)
-
-    search.assert_not_called()
-    assert result["consultoria_interest"] is True
-
-
-@pytest.mark.asyncio
-async def test_profile_mode_treats_nenhum_as_no_reference():
-    state = _state(modelo="nenhum")
-    with patch("app.adapters.openai_client.OpenAIClient.chat", new_callable=AsyncMock) as llm:
-        llm.return_value = _DUMMY_REC
-        with patch("app.rag.retriever.search_products", new_callable=AsyncMock) as search:
-            with patch("app.storage.db.get_session", _mock_db_session):
-                result = await recommend_node(state)
-
-    search.assert_not_called()
-    assert result["consultoria_interest"] is True
-
-
-# ── Prompt-body invariants ──────────────────────────────────────────────────
-
-def test_system_recommend_has_supreme_rule_and_three_modes():
-    """The Sprint 2.0 prompt must declare the qualifier guard + all 3 modes."""
-    from app.agent.prompts import SYSTEM_RECOMMEND
-    s = SYSTEM_RECOMMEND
-    assert "REGRA SUPREMA" in s
-    assert "REFERENCE-SIM" in s
-    assert "REFERENCE-NÃO" in s
-    assert "MODO PROFILE" in s or "PROFILE" in s
-
-
-def test_system_recommend_prohibits_listing_alternatives_in_reference_nao():
-    """The REFERENCE-NÃO mode body forbids alternative-listing."""
-    from app.agent.prompts import SYSTEM_RECOMMEND
-    s = SYSTEM_RECOMMEND.lower()
-    # The mode body says NÃO sugerir alternativas concretas.
-    assert "não sugerir" in s or "proibido listar" in s
+    reply = result["response_blocks"][0].lower()
+    assert "essa raquete" not in reply
+    # Either a neutral "não encontrei esse produto" OR a top-3 fallback that
+    # at least doesn't claim it's a raquete.
+    assert (
+        "produto" in reply
+        or "item" in reply
+        or "modelos parecidos" in reply
+    )

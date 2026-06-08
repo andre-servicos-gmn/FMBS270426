@@ -60,18 +60,53 @@ def _safe_dumps(obj: Any) -> str:
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
-# Sprint 2.5.2 — Bling descriptions use varied dash characters: ASCII "-",
-# en-dash "–", em-dash "—", bullet "•", asterisk "*". The label captures
-# accented letters + spaces; the value captures everything up to a
-# terminator (newline, semicolon, or another bullet/dash at start of line).
+# Sprint 2.6.7 — generic "Label: value" matcher.
+#
+# Pre-2.6.7 required a leading dash/bullet, which missed real catalog
+# entries written bare ("Peso: 220-240g" without any prefix). We now
+# accept BOTH shapes via an OPTIONAL prefix group.
+#
+# Down-side mitigation: the label-whitelist filter (``_TARGET_ATTRIBUTE_LABELS``
+# below) keeps marketing blocks like "Conforto: ..." OUT of the captured
+# attributes, so loosening the regex doesn't pollute the output.
 _LIST_ATTR_RE = re.compile(
-    r"(?:^|[\n\r])[\s]*[-–—•*][\s]*"
+    r"(?:^|[\n\r])[ \t]*(?:[-–—•*][ \t]+)?"
     r"([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ ]{2,40}?)"
-    r"\s*:\s*"
+    # CRITICAL: only consume HORIZONTAL whitespace around the colon.
+    # ``\s*`` would gobble the newline and let the value capture the NEXT
+    # line's label — that's how Sprint 2.6.7 was silently losing "Peso:"
+    # right after a "Características técnicas:" header line.
+    r"[ \t]*:[ \t]*"
     r"([^\n\r;]+?)"
     r"(?=[;\n\r]|$)",
     re.MULTILINE,
 )
+
+
+# Sprint 2.6.7 — the 5 target attributes the agent actually USES. Anything
+# else captured by the regex (perfil, detalhamento, conforto, potência,
+# tecnologia, ...) is dropped from ``atributos_parseados`` to keep that
+# dict CLEAN. Custom-fields path (``_flatten_custom_fields``) still feeds
+# arbitrary keys from Bling — those are trusted explicit metadata.
+_TARGET_ATTRIBUTE_LABELS: dict[str, str] = {
+    # normalized-label → canonical slug
+    "peso": "peso",
+    "peso aproximado": "peso",
+    "equilibrio": "equilibrio",
+    "equilíbrio": "equilibrio",
+    "balance": "equilibrio",
+    "balanco": "equilibrio",
+    "balanço": "equilibrio",
+    "ponto de equilibrio": "equilibrio",
+    "ponto de equilíbrio": "equilibrio",
+    "composicao": "composicao",
+    "composição": "composicao",
+    "material": "composicao",
+    "espessura": "espessura",
+    "espessura do perfil": "espessura",
+    "comprimento": "comprimento",
+    "tamanho": "comprimento",
+}
 
 
 def _strip_html(text: str | None) -> str:
@@ -94,6 +129,29 @@ def _slug(label: str) -> str:
     return norm
 
 
+def _label_to_target_slug(label: str) -> str | None:
+    """Sprint 2.6.7 — return the canonical attribute slug, or None when the
+    label is NOT one of the 5 targets (marketing block, free-form, etc.)."""
+    norm = label.strip().lower()
+    if norm in _TARGET_ATTRIBUTE_LABELS:
+        return _TARGET_ATTRIBUTE_LABELS[norm]
+    # Accent-stripped form so "composição" matches the "composicao" key.
+    stripped = unicodedata.normalize("NFD", norm)
+    stripped = "".join(c for c in stripped if unicodedata.category(c) != "Mn")
+    if stripped in _TARGET_ATTRIBUTE_LABELS:
+        return _TARGET_ATTRIBUTE_LABELS[stripped]
+    return None
+
+
+# Sprint 2.6.7 — terminators that cut a captured value at the right end,
+# so a "Peso: 220-240g Design Edgeless..." block doesn't leak the next
+# section into the previous value.
+_NEXT_BLOCK_CUTTERS: tuple[str, ...] = (
+    " Design ", " Características ", " Caracteristicas ",
+    " Benefícios ", " Beneficios ", " Tecnologia ",
+)
+
+
 def parse_attributes_from_description(html: str | None) -> dict[str, str]:
     """Best-effort: find ``- Label: value`` lines inside the description.
 
@@ -111,9 +169,17 @@ def parse_attributes_from_description(html: str | None) -> dict[str, str]:
     plain = "\n" + plain
     parsed: dict[str, str] = {}
     for label, value in _LIST_ATTR_RE.findall(plain):
-        slug = _slug(label)
+        # Sprint 2.6.7 - whitelist: drop labels that are not target attrs.
+        slug = _label_to_target_slug(label)
+        if slug is None:
+            continue
         clean_value = value.strip(" .;\t ")
-        if slug and clean_value and slug not in parsed:
+        # Sprint 2.6.7 - cut the value at next-block markers so a
+        # multi-section description does not leak into the value.
+        for cutter in _NEXT_BLOCK_CUTTERS:
+            if cutter in clean_value:
+                clean_value = clean_value.split(cutter, 1)[0].strip(" .;\t ")
+        if clean_value and slug not in parsed:
             parsed[slug] = clean_value
     return parsed
 

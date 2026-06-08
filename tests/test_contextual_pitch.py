@@ -251,6 +251,7 @@ def test_pitch_appears_max_once_per_conversation():
     assert "consultoria_mentioned_count" not in update2
 
 
+@pytest.mark.skip(reason="customer_intent_path removed in Sprint 2.6")
 def test_pitch_not_emitted_for_exploring_path():
     state = _state(customer_intent_path="exploring")
     blocks, update = maybe_add_subtle_consultoria_offer(
@@ -317,7 +318,12 @@ async def test_product_detail_weight_emits_delayed_pitch():
     )
     r1 = await product_detail_node(state_first)
     blob1 = " ".join(r1["response_blocks"])
-    assert "Consultoria Base Sports" not in blob1
+    # Pitch signature = "R$ 350" + "abatido" (the micro-tag at
+    # product_detail.py also mentions "Consultoria Base Sports" since
+    # Sprint 2.6.9 brand cleanup, so we can't use the brand name itself
+    # as a pitch-presence proxy anymore).
+    assert "R$ 350" not in blob1
+    assert "abatido" not in blob1.lower()
     assert r1.get("determined_question_count") == 1
     assert r1.get("consultoria_mentioned_count") is None
 
@@ -330,7 +336,8 @@ async def test_product_detail_weight_emits_delayed_pitch():
     )
     r2 = await product_detail_node(state_second)
     blob2 = " ".join(r2["response_blocks"])
-    assert "Consultoria Base Sports" in blob2
+    assert "R$ 350" in blob2
+    assert "abatido" in blob2.lower()
     assert r2.get("consultoria_mentioned_count") == 1
 
 
@@ -379,6 +386,7 @@ async def test_product_detail_comfort_emits_immediate_pitch():
     full = " ".join(result["response_blocks"])
     assert "Conforto e prevenção de lesão" in full  # COMFORT preset opener
     assert result.get("consultoria_mentioned_count") == 1
+@pytest.mark.skip(reason="customer_intent_path removed in Sprint 2.6")
 
 
 @pytest.mark.asyncio

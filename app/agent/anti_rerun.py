@@ -27,6 +27,9 @@ Only ``recommend`` and ``pitch_consultoria`` opt-in to the block check.
 """
 import logging
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
+
+from langchain_core.messages import HumanMessage
 
 from app.agent.nodes._positional_reference import detect_positional_reference
 from app.agent.nodes._product_match import match_product_tolerant
@@ -78,15 +81,43 @@ def is_recent_rerun(
     return (now - last_dt).total_seconds() < threshold_seconds
 
 
+# Sprint 2.6.3 — when the previous human turn and the current one are
+# essentially the same prompt, the customer is repeating; that's the case
+# anti_rerun was built for. When they're substantially different, the
+# customer is asking something new and we must let the node run.
+_QUERY_SIMILARITY_BLOCK_THRESHOLD = 0.75
+
+
+def _previous_user_message(state: AgentState) -> str | None:
+    """Return the SECOND-to-last HumanMessage content, or None."""
+    messages = state.get("messages") or []
+    humans: list[str] = []
+    for m in messages:
+        if isinstance(m, HumanMessage):
+            text = m.content if isinstance(m.content, str) else str(m.content)
+            humans.append(text)
+    if len(humans) < 2:
+        return None
+    return humans[-2]
+
+
+def _query_similarity(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
+    return SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()
+
+
 def _carries_new_info(user_msg: str, state: AgentState) -> tuple[bool, str]:
-    """Return (has_new_info, reason). Sprint 1.15 — smarter than the old
-    length-based heuristic.
+    """Return (has_new_info, reason). Sprint 1.15 + 2.6.3 — relax bias:
+    different query than the previous human turn = new info by default.
 
     'New info' is any of:
         - a product reference (tolerant matcher hit, any confidence)
         - a positional reference ("a primeira")
         - a pronominal reference ("essa", "gostei dessa")
         - a re-recommendation keyword ("outras opções", "mais barato", ...)
+        - (Sprint 2.6.3) the message is meaningfully different from the
+          previous human turn (SequenceMatcher ratio < threshold)
     """
     if not user_msg:
         return False, "empty"
@@ -110,6 +141,21 @@ def _carries_new_info(user_msg: str, state: AgentState) -> tuple[bool, str]:
     for kw in _REREC_KEYWORDS:
         if kw in msg_lower:
             return True, f"rerec_keyword={kw}"
+
+    # Sprint 2.6.3 — fall-through unblocker: when the current and prior
+    # human messages are substantially different, the customer is asking
+    # something NEW (e.g. a different product name) and we must let the
+    # node run. Without this, recommend's anti_rerun blocked a 2nd product
+    # inquiry as if it were a vague follow-up.
+    prev = _previous_user_message(state)
+    if prev is not None:
+        ratio = _query_similarity(prev, user_msg)
+        if ratio < _QUERY_SIMILARITY_BLOCK_THRESHOLD:
+            logger.info(
+                "anti_rerun query_diverged prev=%.40r curr=%.40r ratio=%.2f",
+                prev, user_msg, ratio,
+            )
+            return True, f"query_diverged_ratio_{ratio:.2f}"
 
     return False, "no_signal"
 
@@ -146,9 +192,12 @@ def should_block_rerun(
 # block, short, contextual — gives the customer a path forward without
 # spending another LLM call repeating the same content.
 _FALLBACK_MESSAGES: dict[str, str] = {
+    # Sprint 2.6.2 — the legacy recommend fallback claimed "te mostrei
+    # algumas opções acima" which was a lie post-2.6 (recommend now answers
+    # one product at a time, never lists multiples). Replaced with a neutral
+    # ask for more detail.
     "recommend": (
-        "Te mostrei algumas opções acima. Quer escolher uma, comparar, "
-        "ou prefere que eu busque outras?"
+        "Pode me dar mais detalhes do que você procura?"
     ),
     "pitch_consultoria": (
         "Te expliquei a Consultoria acima. Quer agendar, tirar dúvida sobre "
@@ -161,5 +210,5 @@ def fallback_message_for(node_name: str) -> str:
     """Return the canned fallback used when blocking a rerun of ``node_name``."""
     return _FALLBACK_MESSAGES.get(
         node_name,
-        "Acho que já te respondi sobre isso. Quer me dizer com mais detalhe o que precisa?",
+        "Pode me dar mais detalhes do que você procura?",
     )

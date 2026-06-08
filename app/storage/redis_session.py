@@ -20,6 +20,7 @@ from typing import Any
 from redis.asyncio import Redis
 
 from app.config import get_settings
+from app.storage.redis_resilient import make_resilient_redis
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +38,26 @@ def _now() -> float:
 def _get_redis_client() -> Redis:
     global _redis_client
     if _redis_client is None:
-        _redis_client = Redis.from_url(get_settings().redis_url, decode_responses=True)
+        # Sprint 2.6.5 — resilient client (keepalive + health_check + retry).
+        _redis_client = make_resilient_redis(get_settings().redis_url)
     return _redis_client
+
+
+async def reset_redis_client() -> None:
+    """Sprint 2.6.5 — discard the singleton so the next call rebuilds it.
+
+    Called by the webhook's retry layer when the active client is dead
+    (idle-kill / closed socket / "'NoneType' object is not callable" from
+    a half-broken connection pool). Safe no-op when no client exists.
+    """
+    global _redis_client
+    client = _redis_client
+    _redis_client = None
+    if client is not None:
+        try:
+            await client.aclose()
+        except Exception as exc:
+            logger.info("redis_client_close_failed (ignored): %s", exc)
 
 
 class RedisSessionStore:

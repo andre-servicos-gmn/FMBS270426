@@ -1,16 +1,17 @@
-"""Sprint 1.10 / 2.4 / 2.5 — price inquiry node.
+"""Sprint 1.10 / 2.4 / 2.5 / 2.6.4 — price inquiry node.
 
-Sprint 2.5 additions:
-- When the active product comes from the Bling catalog, we attach
-  ``is_raquete`` so the subtle Consultoria pitch only fires for racket
-  products (non-rackets receive a clean price answer).
-- We also check the real-time stock via the cached helper; if the product
-  is out of stock, we replace the prompt-for-next-step with a friendly
-  "tô confirmando, mas no momento parece estar em falta" message.
+Sprint 2.6.4 additions:
+- When ``state.last_product_candidates`` is populated (set by recommend
+  on an ambiguous match), the node detects multi-product references like
+  "as duas", "ambas", "os três" and quotes the price of EVERY candidate.
+- Otherwise it falls back to the Sprint 2.5 single-product path with
+  stock check + subtle Consultoria pitch.
 
 The node remains LLM-free.
 """
 import logging
+import re
+import unicodedata
 
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -21,6 +22,31 @@ from app.agent.state import AgentState
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+# Sprint 2.6.4 — pronouns the customer uses to reference a whole group
+# (e.g. "os dois", "as duas", "ambas", "todas"). Detected accent-insensitive.
+_MULTI_REF_PATTERNS = (
+    "as duas", "os dois", "as tres", "os tres", "as três", "os três",
+    "ambas", "ambos", "todas", "todos",
+    "os 2", "as 2", "os 3", "as 3",
+    "todas elas", "todos eles", "as opcoes", "as opções",
+)
+
+
+def _strip_accents(text: str) -> str:
+    return "".join(
+        c for c in unicodedata.normalize("NFD", text or "")
+        if unicodedata.category(c) != "Mn"
+    )
+
+
+def is_multi_product_reference(text: str) -> bool:
+    """True when the customer references multiple products at once."""
+    if not text:
+        return False
+    norm = _strip_accents(text).lower()
+    return any(p in norm for p in _MULTI_REF_PATTERNS)
 
 
 def _is_raquete(product: dict | None) -> bool:
@@ -56,11 +82,31 @@ async def _maybe_stock_note(product: dict | None) -> str | None:
 
 async def price_inquiry_node(state: AgentState) -> dict:
     products = state.get("recommended_products") or []
+    candidates = state.get("last_product_candidates") or []
     messages = state.get("messages") or []
     last_human = next((m for m in reversed(messages) if isinstance(m, HumanMessage)), None)
     user_text = (
         last_human.content if last_human and isinstance(last_human.content, str) else ""
     )
+
+    # ── Sprint 2.6.4 — multi-product reference path ────────────────────────
+    # Customer said "as duas" / "ambas" / "todas" AND we have candidates
+    # from the previous ambiguous turn → quote price of every candidate.
+    if candidates and len(candidates) >= 2 and is_multi_product_reference(user_text):
+        lines = [
+            f"A *{c.get('name')}* sai por {format_price_brl(c.get('price_cents'))}."
+            for c in candidates
+        ]
+        blocks = ["\n".join(lines), "Posso tirar mais alguma dúvida?"]
+        logger.info(
+            "price_inquiry multi_candidates_reference n=%d",
+            len(candidates),
+        )
+        joined = "\n\n".join(blocks)
+        return {
+            "messages": [AIMessage(content=joined)],
+            "response_blocks": blocks,
+        }
 
     matched = match_product_in_text(user_text, products)
     target = matched or (products[0] if len(products) == 1 else None)
@@ -68,13 +114,12 @@ async def price_inquiry_node(state: AgentState) -> dict:
     pitch_update: dict = {}
 
     if matched is not None or (products and len(products) == 1):
-        name = target.get("name", "essa raquete")
+        name = target.get("name", "esse produto")
         price = format_price_brl(target.get("price_cents"))
         blocks = [f"A *{name}* sai por {price}.", "Posso tirar mais alguma dúvida?"]
 
         stock_note = await _maybe_stock_note(target)
         if stock_note:
-            # When out of stock, swap the prompt-for-next-step for the heads-up.
             blocks = [f"A *{name}* sai por {price}.", stock_note]
 
         blocks, pitch_update = maybe_add_subtle_consultoria_offer(
@@ -95,11 +140,21 @@ async def price_inquiry_node(state: AgentState) -> dict:
         ]
         logger.info("price_inquiry ambiguous listed=%d", len(products))
     else:
-        blocks = [
-            "Posso te indicar os preços assim que te apresentar as opções. "
-            "Quer que eu te ajude a encontrar uma raquete?"
-        ]
-        logger.warning("price_inquiry called with empty recommended_products")
+        # Sprint 2.6.4 — fall back to candidates when no shortlist confirmed.
+        if candidates:
+            target = candidates[0]
+            name = target.get("name", "esse produto")
+            price = format_price_brl(target.get("price_cents"))
+            blocks = [
+                f"A *{name}* sai por {price}.",
+                "Posso tirar mais alguma dúvida?",
+            ]
+            logger.info("price_inquiry single_candidate_fallback name=%s", name)
+        else:
+            blocks = [
+                "Pode me dizer qual produto te interessa? Aí te passo o preço."
+            ]
+            logger.warning("price_inquiry called with empty recommended_products + candidates")
 
     joined = "\n\n".join(blocks)
     return {

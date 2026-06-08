@@ -1,4 +1,9 @@
-"""Sprint 2.1 — cliente determinado test suite.
+"""Sprint 2.1 — cliente determinado test suite (Sprint 2.6: SKIPPED).
+
+Sprint 2.6 removed the determined / exploring fork because diagnose was
+removed entirely. Every customer who reaches a product node is "determined"
+by definition; there's no flag to flip and no opinion-seek override. The
+tests below remain as historical reference but are skipped at module level.
 
 Covers:
 - Triage path detection (determined / exploring / opinion-flip).
@@ -21,6 +26,10 @@ import pytest
 from langchain_core.messages import HumanMessage
 
 from app.agent.state import AgentState
+
+pytestmark = pytest.mark.skip(
+    reason="diagnose deprecated in Sprint 2.6 — customer_intent_path removed"
+)
 
 
 @asynccontextmanager

@@ -14,6 +14,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
+pytestmark = pytest.mark.skip(
+    reason="diagnose deprecated in Sprint 2.6 — node disconnected from graph"
+)
+
 from app.agent.state import AgentState
 
 

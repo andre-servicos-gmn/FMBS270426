@@ -1,0 +1,68 @@
+# .dockerignore — reduces the build context Docker reads from the host.
+# Anything matched here NEVER reaches the daemon, so it can't end up in
+# the image even by accident (a stray `COPY . .` would still be safe).
+
+# ── Secrets (absolute red line) ──────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.env
+
+# ── Local Python virtualenv / build artifacts ────────────────────────────
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+dist/
+build/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# ── Tests, fixtures, docs — not needed at runtime ────────────────────────
+tests/
+docs/
+
+# ── Supabase migrations — applied via supabase CLI, not at runtime ───────
+supabase/
+
+# ── Git / IDE / OS junk ──────────────────────────────────────────────────
+.git/
+.gitignore
+.gitattributes
+.github/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# ── Claude Code / MCP local config ───────────────────────────────────────
+.claude/
+.mcp.json
+
+# ── Local debug dumps (Bling --debug-first output) ───────────────────────
+debug_raw_payload_*.json
+*.dump
+
+# ── Logs and backups ─────────────────────────────────────────────────────
+*.log
+*-backup-*/
+backup_*/
+
+# ── Deploy artifacts for other platforms (Heroku/Railway) ────────────────
+# Kept in the repo for parity but not needed inside the Docker image.
+Procfile
+runtime.txt
+
+# ── Documentation / project metadata ─────────────────────────────────────
+README.md
+CLAUDE.md
+ESCOPO.md
+DEPLOY.md
+*.md

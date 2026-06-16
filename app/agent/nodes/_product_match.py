@@ -201,6 +201,175 @@ def _strip_spaces(s: str) -> str:
     return "".join(s.split())
 
 
+# ── Sprint 2.7.3 — category hint detection + filter ─────────────────────────
+#
+# "Drop shot raquete" used to return clothes ("Short Drop Shot Carbon", "Top
+# Drop Shot Feminino") because the word "raquete" is in _GENERIC_TOKENS and
+# is filtered out of distinctive_tokens — so the matcher saw only {drop,
+# shot} and tied clothes vs racket at score 1.0.
+#
+# Fix: when the customer types a category keyword, FILTER the candidate
+# list to that category BEFORE the scoring layers run. The keyword keeps
+# being filtered from token-score (still generic), but the FILTER acts as
+# a hard category gate.
+#
+# Each entry is keyword → category slug. The slug is what we compare
+# against ``categoria_nome`` / ``is_raquete_praia`` on the product side.
+
+_CATEGORY_KEYWORDS: dict[str, str] = {
+    # Rackets (beach tennis) — is_raquete_praia=True
+    "raquete": "raquete",
+    "raquetes": "raquete",
+    # Padel/pickleball rackets
+    "pala": "pala",
+    "palas": "pala",
+    # Bottoms
+    "short": "vestuario",
+    "shorts": "vestuario",
+    "calca": "vestuario",
+    "calcas": "vestuario",
+    "calça": "vestuario",
+    "calças": "vestuario",
+    "legging": "vestuario",
+    "leggings": "vestuario",
+    "saia": "vestuario",
+    "saias": "vestuario",
+    # Tops
+    "top": "vestuario",
+    "tops": "vestuario",
+    "camiseta": "vestuario",
+    "camisetas": "vestuario",
+    "camisa": "vestuario",
+    "camisas": "vestuario",
+    "vestido": "vestuario",
+    "vestidos": "vestuario",
+    # Balls
+    "bola": "bola",
+    "bolas": "bola",
+    "bolinha": "bola",
+    "bolinhas": "bola",
+    # Bags
+    "raqueteira": "bolsa",
+    "raqueteiras": "bolsa",
+    "mochila": "bolsa",
+    "bolsa": "bolsa",
+    "bolsas": "bolsa",
+    # Footwear
+    "sapatilha": "calcado",
+    "sapatilhas": "calcado",
+    "tenis": "calcado",
+    "tênis": "calcado",
+    # Accessories
+    "grip": "acessorio",
+    "grips": "acessorio",
+    "overgrip": "acessorio",
+    "overgrips": "acessorio",
+    "manguito": "acessorio",
+    "manguitos": "acessorio",
+    "bone": "acessorio",
+    "boné": "acessorio",
+    "bones": "acessorio",
+    "bonés": "acessorio",
+    "antivibrador": "acessorio",
+    "antivibradores": "acessorio",
+}
+
+
+def detect_category_hint(query: str) -> str | None:
+    """Return the category slug the customer hinted at, or None.
+
+    Conservative: looks for an unambiguous category keyword (3+ chars) as
+    a whole word in the normalized query. "Mormaii Sunset" → None
+    (no keyword); "drop shot raquete" → "raquete"; "tem short?" →
+    "vestuario".
+
+    When the SAME query mentions keywords from DIFFERENT categories
+    (e.g. "short e raquete"), returns the FIRST hit by iteration order —
+    which is intentionally undefined for that edge case. In practice,
+    fall-through behavior (no hard guarantee) is fine; the matcher
+    fallback (empty filtered list → revert to full list) is the safety
+    net.
+    """
+    if not query:
+        return None
+    norm = normalize(query)
+    tokens = re.findall(r"[a-z0-9çãáàâéêíóôõúü]+", norm)
+    for tok in tokens:
+        # Accent-stripped lookup is enough — _CATEGORY_KEYWORDS includes
+        # both accented and unaccented variants for the customer side.
+        hit = _CATEGORY_KEYWORDS.get(tok)
+        if hit is not None:
+            return hit
+    return None
+
+
+def _product_category_slug(product: dict) -> str | None:
+    """Map a catalog product to one of our category slugs, or None when
+    no rule applies (defensive — caller falls back to full list).
+
+    Order of decision (first match wins):
+        1. ``is_raquete_praia=True`` → "raquete"
+        2. categoria_nome contains "PADEL" or "PICKLEBALL" → "pala"
+        3. ``categoria_nome`` known clothing names → "vestuario"
+        4. ``categoria_nome`` contains "BOLA" → "bola"
+        5. ``categoria_nome`` contains "RAQUETEIRA" / "MOCHILA" / "BOLSA" → "bolsa"
+        6. ``categoria_nome`` contains "SAPATILHA" / "TÊNIS" → "calcado"
+        7. ``categoria_nome`` in known accessory names → "acessorio"
+        8. else: None (don't classify; ineligible for category filter).
+    """
+    if product.get("is_raquete_praia") is True:
+        return "raquete"
+
+    raw_cat = (product.get("categoria_nome") or "").strip()
+    if not raw_cat:
+        return None
+    cat = normalize(raw_cat)
+
+    if "padel" in cat or "pickleball" in cat:
+        return "pala"
+
+    # Clothing — names match the BLING_SYNC_CATEGORIES list exactly.
+    _CLOTHING = {
+        "camisetas e camisas", "shorts", "short", "top", "saias",
+        "camiseta babylook", "calca legging", "calcas", "calca", "vestidos",
+    }
+    if cat in _CLOTHING:
+        return "vestuario"
+
+    if "bola" in cat:
+        return "bola"
+
+    if "raqueteira" in cat or "mochila" in cat or "bolsa" in cat:
+        return "bolsa"
+
+    if "sapatilha" in cat or "tenis" in cat:
+        return "calcado"
+
+    _ACCESSORIES = {"grips", "undergrip", "anti vibradores", "bones", "bone"}
+    if cat in _ACCESSORIES:
+        return "acessorio"
+
+    return None
+
+
+def filter_by_category(
+    products: list[dict], hint: str | None
+) -> list[dict]:
+    """If ``hint`` is set, return only products whose category slug
+    matches. Empty result → fall back to the full list (gracious — never
+    return zero just because the keyword mapping was incomplete)."""
+    if not hint or not products:
+        return products
+    filtered = [p for p in products if _product_category_slug(p) == hint]
+    if not filtered:
+        # Fallback: hint produced no candidates (cliente asked "raquete"
+        # but the catalog has no raquete — rare). Keep the original list
+        # so the matcher can still return SOMETHING relevant rather than
+        # a hard "não encontrei".
+        return products
+    return filtered
+
+
 # ── Public types ─────────────────────────────────────────────────────────────
 
 Confidence = Literal["high", "low", "none"]
@@ -558,6 +727,23 @@ def match_product_tolerant(text: str, products: list[dict]) -> MatchResult:
     text_norm_raw = normalize(text)
     if not text_norm_raw:
         return _NO_MATCH
+
+    # Sprint 2.7.3 — category gate. When the customer types a category
+    # keyword ("raquete", "short", "top"), restrict the candidate list to
+    # that category BEFORE scoring. This fixes "drop shot raquete" → roupas
+    # (was: 3-way tie at score 1.0 between Short, Top, and Raquete Drop
+    # Shot; clothes won the tiebreak). Gracious fallback: if the filter
+    # leaves an empty list, revert to the original — caller still gets
+    # the best-effort match instead of a hard "não encontrei".
+    hint = detect_category_hint(text)
+    if hint is not None:
+        original_n = len(products)
+        products = filter_by_category(products, hint)
+        import logging as _lg
+        _lg.getLogger("app.agent.nodes._product_match").info(
+            "category_hint=%s filtered_n=%d (from %d)",
+            hint, len(products), original_n,
+        )
 
     # Sprint 2.6.8 — strip greetings / courtesy / generic adjectives BEFORE
     # any layer sees the query. Otherwise Levenshtein scores short

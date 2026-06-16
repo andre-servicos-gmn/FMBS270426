@@ -146,6 +146,46 @@ class EvolutionClient:
         )
         return raw, mimetype
 
+    async def send_presence(
+        self,
+        phone: str,
+        *,
+        presence: str = "composing",
+        delay_ms: int = 0,
+    ) -> bool:
+        """Sprint 2.7.2 — send a presence indicator ("typing...", "recording",
+        "online") to mask debounce-window latency.
+
+        Evolution V2 exposes this at ``POST /chat/sendPresence/{instance}``.
+        Different self-hosted builds vary in payload shape; we send the
+        common-denominator JSON: ``{"number", "presence", "delay"}``.
+
+        Best-effort: returns True on 2xx, False on any failure. Never
+        raises — typing indicator is cosmetic, must NOT break the message
+        flow. Caller may ignore the return value.
+        """
+        url = f"{self._base_url}/chat/sendPresence/{self._instance}"
+        payload: dict[str, Any] = {"number": phone, "presence": presence}
+        if delay_ms:
+            payload["delay"] = delay_ms
+
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(url, json=payload, headers=self._headers)
+            ok = 200 <= resp.status_code < 300
+            logger.info(
+                "evolution_send_presence phone=%.8s presence=%s status=%d",
+                phone, presence, resp.status_code,
+            )
+            return ok
+        except Exception as exc:  # noqa: BLE001 — best effort, cosmetic
+            logger.info(
+                "evolution_send_presence_failed phone=%.8s presence=%s err=%.80s "
+                "(non-fatal — typing indicator is cosmetic)",
+                phone, presence, str(exc),
+            )
+            return False
+
     async def send_text_blocks(self, phone: str, blocks: list[str]) -> None:
         """Send a sequence of WhatsApp messages with humanizing delays.
 

@@ -39,7 +39,7 @@ from app.agent.nodes.price_inquiry import price_inquiry_node
 from app.agent.nodes.product_selection import product_selection_node
 from app.agent.nodes.recommend import recommend_node
 from app.agent.nodes.scheduling_inquiry import scheduling_inquiry_node
-from app.agent.nodes.triage import triage_node
+from app.agent.nodes.triage import recent_chat_history, triage_node
 from app.agent.prompts import SYSTEM_NAME_EXTRACT, SYSTEM_SMALLTALK
 from app.agent.state import AgentState
 
@@ -116,12 +116,32 @@ async def _smalltalk_node(state: AgentState) -> dict:
         return update
 
     # Phase 3: normal smalltalk reply.
-    user_block = (
-        f"Nome do cliente: {customer_name}\n\n{content}"
-        if customer_name else content
-    )
+    # Sprint 2.7.1 — pass the recent history so the LLM can respond
+    # contextually instead of always producing the generic "E aí, Felipe!"
+    # greeting. The name (if known) is prepended to the LAST user message
+    # only, so the model sees a clean conversation transcript plus the
+    # name hint where it matters.
+    history = recent_chat_history(messages, window=4)
+    if not history:
+        # First-turn / no usable history — fall back to the legacy single
+        # user-block format (same shape pre-2.7.1).
+        user_block = (
+            f"Nome do cliente: {customer_name}\n\n{content}"
+            if customer_name else content
+        )
+        chat_messages: list[dict[str, str]] = [{"role": "user", "content": user_block}]
+    else:
+        # Inject the name hint into the LAST user turn so it doesn't get
+        # echoed into a previous user message.
+        if customer_name and history and history[-1]["role"] == "user":
+            history[-1] = {
+                "role": "user",
+                "content": f"Nome do cliente: {customer_name}\n\n{history[-1]['content']}",
+            }
+        chat_messages = history
+
     response = await client.chat(
-        messages=[{"role": "user", "content": user_block}],
+        messages=chat_messages,
         system=SYSTEM_SMALLTALK,
         max_tokens=150,
         temperature=0.7,

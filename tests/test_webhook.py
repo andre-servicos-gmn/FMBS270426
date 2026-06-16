@@ -77,12 +77,24 @@ def fake_redis():
 
 @pytest.fixture
 def override_token(monkeypatch):
-    """Inject a known webhook token into settings."""
+    """Inject a known webhook token into settings.
+
+    Sprint 2.7.2 — also configures the debounce buffer for cap=1 so every
+    incoming text message flushes IMMEDIATELY (matching pre-2.7.2 behaviour
+    that these tests assume). Tests that specifically exercise debounce
+    grouping live in tests/test_debounce_buffer.py with their own fixture.
+    """
     monkeypatch.setenv("EVOLUTION_WEBHOOK_TOKEN", _TOKEN)
+    monkeypatch.setenv("MESSAGE_DEBOUNCE_CAP", "1")
+    monkeypatch.setenv("MESSAGE_DEBOUNCE_MS", "10")
+    monkeypatch.setenv("MESSAGE_DEBOUNCE_HARD_TTL_MS", "100")
     from app.config import get_settings
     get_settings.cache_clear()
+    from app.api.webhook import _reset_debounce_buffer
+    _reset_debounce_buffer()
     yield
     get_settings.cache_clear()
+    _reset_debounce_buffer()
 
 
 # ── Shared mock context manager for DB session ────────────────────────────────
@@ -105,10 +117,19 @@ def _make_db_mock() -> tuple:
 
 @pytest.fixture
 def no_token(monkeypatch):
-    """Force EVOLUTION_WEBHOOK_TOKEN to empty so auth bypass kicks in."""
+    """Force EVOLUTION_WEBHOOK_TOKEN to empty so auth bypass kicks in.
+
+    Sprint 2.7.2 — same cap=1 trick as ``override_token`` so existing
+    webhook tests bypass the debounce buffer.
+    """
     monkeypatch.setenv("EVOLUTION_WEBHOOK_TOKEN", "")
+    monkeypatch.setenv("MESSAGE_DEBOUNCE_CAP", "1")
+    monkeypatch.setenv("MESSAGE_DEBOUNCE_MS", "10")
+    monkeypatch.setenv("MESSAGE_DEBOUNCE_HARD_TTL_MS", "100")
     from app.config import get_settings
     get_settings.cache_clear()
+    from app.api.webhook import _reset_debounce_buffer
+    _reset_debounce_buffer()
     yield
     get_settings.cache_clear()
 

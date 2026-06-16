@@ -214,14 +214,14 @@ def _build_user_block(
     customer_name: str | None,
     last_text: str,
     already_offered: bool,
+    price_range_mentioned: bool = False,
 ) -> str:
     """Compose the user-side block fed to the LLM (under the system prompt).
 
     The system prompt carries principles + facts + red lines. The user
     block carries the LIVE context: who the customer is, what they just
-    said, and whether the Consultoria was already pitched in this
-    conversation (so the model knows to refuse-acknowledge instead of
-    repeating).
+    said, whether the Consultoria was already pitched in this conversation,
+    and (Sprint 2.7.3) whether the customer mentioned a budget.
     """
     lines: list[str] = []
     if customer_name:
@@ -239,6 +239,23 @@ def _build_user_block(
         "de ele nomear um modelo se já tiver um em mente."
     )
     lines.append(state_line)
+
+    # Sprint 2.7.3 — budget hint. Customer voluntarily mentioned a price
+    # ceiling. The agent MUST NOT list products by price (Sprint 2.6.9
+    # red line) but SHOULD acknowledge the budget naturally and frame
+    # the Consultoria as the place where perfil + jogo + faixa de valor
+    # come together.
+    if price_range_mentioned:
+        lines.append(
+            "ATENÇÃO: o cliente MENCIONOU faixa de preço / orçamento na "
+            "mensagem. Reconheça isso de forma natural na resposta — "
+            "explique que a Consultoria considera não só perfil e estilo "
+            "de jogo, mas também faixa de investimento, pra recomendar "
+            "uma raquete que faça sentido nas três frentes. NÃO ofereça "
+            "um produto específico, NÃO liste opções, NÃO mencione "
+            "valores de produto. Mantenha o tom da resposta dentro das "
+            "linhas vermelhas habituais."
+        )
 
     if last_text:
         lines.append(f"Última mensagem do cliente: {last_text}")
@@ -268,6 +285,7 @@ async def help_request_node(state: AgentState) -> dict:
     phone_hash = state.get("phone_hash") or ""
     customer_name = state.get("customer_name")
     already_offered = bool(state.get("help_request_already_offered"))
+    price_range_mentioned = bool(state.get("price_range_mentioned"))
 
     messages = state.get("messages") or []
     last_human = next(
@@ -284,6 +302,7 @@ async def help_request_node(state: AgentState) -> dict:
         customer_name=customer_name,
         last_text=last_text,
         already_offered=already_offered,
+        price_range_mentioned=price_range_mentioned,
     )
 
     client = OpenAIClient()
@@ -337,4 +356,7 @@ async def help_request_node(state: AgentState) -> dict:
         "response_blocks": [text],
         "consultoria_interest": True,
         "help_request_already_offered": True,
+        # Sprint 2.7.3 — flag consumed; clear so a follow-up turn doesn't
+        # keep re-injecting the budget instruction.
+        "price_range_mentioned": False,
     }

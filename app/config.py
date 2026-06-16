@@ -33,6 +33,17 @@ class Settings(BaseSettings):
     # mundo. Use em dev/staging; em produção mantenha vazio salvo necessidade.
     reset_allowed_phones: str = Field(default="")
 
+    # Sprint 2.7.2 — debounce de mensagens rápidas do mesmo cliente.
+    # Mensagens de TEXTO recebidas em ``message_debounce_ms`` umas das outras
+    # são agrupadas em um único processamento (input concatenado por ". ").
+    # Resolve o bug do Felipe: "Quero a Proteo" + "Vc tem?" 200ms depois →
+    # 1 resposta coerente em vez de 2 (uma certa, uma genérica).
+    # ``cap`` e ``hard_ttl`` são circuit-breakers defensivos: se o cliente
+    # mandar muito ou ficar resetando o timer indefinidamente, força flush.
+    message_debounce_ms: int = Field(default=1500)
+    message_debounce_cap: int = Field(default=10)
+    message_debounce_hard_ttl_ms: int = Field(default=8000)
+
     # Redis
     redis_url: str = Field(default="redis://localhost:6379/0")
     session_ttl_seconds: int = Field(default=86400)

@@ -130,3 +130,24 @@ class AgentState(TypedDict):
     # checkpointer silently discards keys absent from the schema, which
     # is exactly the failure mode the Felipe production logs showed.
     awaiting_detail_choice: NotRequired[bool]
+    # Sprint 2.7.1 — set to True by recommend_node whenever it emits the
+    # ambiguous-list message ("Qual você procura? • A • B • C"). The next
+    # turn's triage uses it together with ``last_product_candidates`` to
+    # short-circuit positional ("primeira"), year-token ("2026") and
+    # partial-name ("Hugo Russo") selections BEFORE the LLM gets a chance
+    # to misclassify them as smalltalk (the production "amnesia" bug —
+    # Felipe, 2026-06).
+    #
+    # CRITICAL: declared in the TypedDict so the checkpointer persists it.
+    # See the awaiting_detail_choice comment above for the same lesson.
+    awaiting_candidate_choice: NotRequired[bool]
+    # Sprint 2.7.3 — flipped True by the triage short-circuit when the
+    # customer mentions a budget ("até 2k", "no máximo 1500", "uns 2 mil
+    # reais"). help_request_node reads it to acknowledge the budget in
+    # the Consultoria pitch ("a Consultoria considera perfil, jogo E
+    # faixa de valor"). NEVER lists products — the business rule forbids
+    # price-range vitrine. Cleared by help_request after consumption.
+    #
+    # CRITICAL: declared in the TypedDict (lesson 2.6.10) so the
+    # checkpointer doesn't silently drop it between turns.
+    price_range_mentioned: NotRequired[bool]

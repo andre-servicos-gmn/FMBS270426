@@ -20,6 +20,7 @@ from app.agent.reset import (
     is_reset_command,
     reset_conversation,
 )  # DEV_RESET_HOOK
+from app.api.debounce_buffer import DebounceBuffer
 from app.config import get_settings
 from app.security.audit_log import log_access
 from app.security.pii_masker import hash_phone, mask_pii
@@ -54,6 +55,63 @@ def _get_graph():  # type: ignore[return]
     if _graph is None:
         _graph = build_graph()
     return _graph
+
+
+# ── Sprint 2.7.2 — debounce buffer singleton ──────────────────────────────────
+#
+# Groups rapid text messages from the same phone_hash into ONE graph
+# invocation. Bypassed for non-text (audio/image/document) and /reset.
+# The buffer's on_flush callback is _process_message — the merged text
+# flows through the existing pipeline unchanged.
+
+_debounce_buffer: DebounceBuffer | None = None
+
+
+async def _on_first_buffered_message(raw_phone: str) -> None:
+    """Sprint 2.7.2 Ajuste 1 — fire the WhatsApp 'typing...' presence
+    when a new buffer opens, so the debounce window doesn't look like
+    the agent froze. Cosmetic; failures are swallowed inside
+    ``send_presence``."""
+    await EvolutionClient().send_presence(
+        raw_phone,
+        presence="composing",
+        # Hint a bit beyond the debounce window so the indicator stays
+        # visible across the buffer wait + initial graph latency.
+        delay_ms=get_settings().message_debounce_ms + 2000,
+    )
+
+
+def _get_debounce_buffer() -> DebounceBuffer:
+    """Lazy singleton — uses current settings for cap/window/ttl."""
+    global _debounce_buffer
+    if _debounce_buffer is None:
+        settings = get_settings()
+        _debounce_buffer = DebounceBuffer(
+            window_ms=settings.message_debounce_ms,
+            cap=settings.message_debounce_cap,
+            hard_ttl_ms=settings.message_debounce_hard_ttl_ms,
+            on_flush=_dispatch_flushed_message,
+            on_first_message=_on_first_buffered_message,
+        )
+    return _debounce_buffer
+
+
+def _reset_debounce_buffer() -> None:
+    """Used by tests to inject custom windows / fakes."""
+    global _debounce_buffer
+    _debounce_buffer = None
+
+
+async def _dispatch_flushed_message(
+    raw_phone: str, phone_hash: str, merged_text: str
+) -> None:
+    """Sprint 2.7.2 — buffer's on_flush callback. Hands the merged
+    message off to the existing single-turn pipeline."""
+    await _process_message(
+        raw_phone=raw_phone,
+        phone_hash=phone_hash,
+        message_text=merged_text,
+    )
 
 
 # ── Sprint 2.6.5 — resilient retry layer + honest fallback ──────────────────
@@ -413,14 +471,31 @@ async def webhook_whatsapp(
         )
         return {"status": "ok", "reset": True}
 
+    # Sprint 2.7.2 — TEXT messages go through the debounce buffer so a
+    # burst from the same customer is grouped into ONE graph invocation.
+    # Media (audio/image/document) and the /reset magic command are
+    # dispatched directly above and never reach this branch.
     background_tasks.add_task(
-        _process_message,
+        _buffer_text_message,
         raw_phone=raw_phone,
         phone_hash=phone_hash,
         message_text=message_text,
     )
 
     return {"status": "ok"}
+
+
+async def _buffer_text_message(
+    raw_phone: str, phone_hash: str, message_text: str
+) -> None:
+    """Tiny shim — yields control to the BackgroundTask runner before
+    awaiting the buffer's lock so the webhook can return 200 with
+    minimal latency."""
+    await _get_debounce_buffer().add(
+        raw_phone=raw_phone,
+        phone_hash=phone_hash,
+        message_text=message_text,
+    )
 
 
 # ── Canned-response helpers (Sprint 1.12) ─────────────────────────────────────

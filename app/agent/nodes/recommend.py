@@ -199,6 +199,8 @@ async def recommend_node(state: AgentState) -> dict:
             # turn must read this flag in triage and short-circuit "detalhes"
             # / "sim" / "manda" → attribute_inquiry (NOT help_request).
             "awaiting_detail_choice": True,
+            # Sprint 2.7.1 — leaving the ambiguous-list mode.
+            "awaiting_candidate_choice": False,
             **stamp_node_execution("recommend"),
         }
 
@@ -223,6 +225,10 @@ async def recommend_node(state: AgentState) -> dict:
                 "response_blocks": [text],
                 "recommended_products": [],
                 "last_product_candidates": top3,
+                # Sprint 2.7.1 — top3 fallback message ends with "Algum
+                # desses é o que você procura?" — same UX as ambiguous.
+                # Triage uses this flag to short-circuit "primeira"/"2026".
+                "awaiting_candidate_choice": True,
                 **stamp_node_execution("recommend"),
             }
 
@@ -233,6 +239,7 @@ async def recommend_node(state: AgentState) -> dict:
             "response_blocks": [text],
             "recommended_products": [],
             "last_product_candidates": None,
+            "awaiting_candidate_choice": False,
             **stamp_node_execution("recommend"),
         }
 
@@ -254,6 +261,8 @@ async def recommend_node(state: AgentState) -> dict:
             "last_product_candidates": None,
             # Sprint 2.6.10 — see comment in the confirmation_resolved branch.
             "awaiting_detail_choice": True,
+            # Sprint 2.7.1 — single match → leaving ambiguous-list mode.
+            "awaiting_candidate_choice": False,
             **stamp_node_execution("recommend"),
         }
 
@@ -270,6 +279,9 @@ async def recommend_node(state: AgentState) -> dict:
             "messages": [AIMessage(content=text)],
             "response_blocks": [text],
             "awaiting_match_confirmation": candidate,
+            # Sprint 2.7.1 — "Você quis dizer X?" is its own confirmation
+            # mode; not a candidate list. Clear the ambiguous-list flag.
+            "awaiting_candidate_choice": False,
             **stamp_node_execution("recommend"),
         }
 
@@ -277,7 +289,8 @@ async def recommend_node(state: AgentState) -> dict:
         candidates = list(match.candidates or [])
         text = _ambiguous_text(candidates)
         logger.info(
-            "recommend ambiguous n_candidates=%d", len(candidates),
+            "recommend ambiguous n_candidates=%d awaiting_candidate_choice=True",
+            len(candidates),
         )
         return {
             "messages": [AIMessage(content=text)],
@@ -285,6 +298,10 @@ async def recommend_node(state: AgentState) -> dict:
             # Sprint 2.6.4 — stash candidates so price_inquiry / triage can
             # resolve "as duas" / "ambas" / "o segundo" on the next turn.
             "last_product_candidates": candidates,
+            # Sprint 2.7.1 — flips the triage candidate-choice short-circuit
+            # so "primeira" / "2026" / "Hugo Russo" get resolved without the
+            # LLM having to guess.
+            "awaiting_candidate_choice": True,
             **stamp_node_execution("recommend"),
         }
 
@@ -295,5 +312,6 @@ async def recommend_node(state: AgentState) -> dict:
         "response_blocks": [text],
         "recommended_products": [],
         "last_product_candidates": None,
+        "awaiting_candidate_choice": False,
         **stamp_node_execution("recommend"),
     }

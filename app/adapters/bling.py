@@ -22,6 +22,7 @@ import asyncio
 import base64
 import logging
 import secrets
+import unicodedata
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -74,6 +75,11 @@ class BlingClient:
         self._client_id = settings.bling_client_id
         self._client_secret = settings.bling_client_secret
         self._redirect_uri = settings.bling_redirect_uri
+        # Sprint 2.7.4 — cached id of the "Produtos" module on
+        # ``/campos-customizados/modulos``. Discovered lazily on the first
+        # call to ``listar_campos_customizados`` so the catalog discovery
+        # only spends 1 extra HTTP call per BlingClient lifetime.
+        self._produtos_module_id: int | None = None
 
     # ── OAuth: authorize URL + code exchange + refresh ───────────────────
 
@@ -323,25 +329,153 @@ class BlingClient:
         data = await self._request("GET", "/depositos")
         return data.get("data") or []
 
-    async def listar_campos_customizados(self) -> list[dict[str, Any]]:
-        """Sprint 2.5.2 — fetch the catalog of custom-field definitions.
+    async def _find_produtos_module_id(self) -> int | None:
+        """Sprint 2.7.4 — discover the id of the "Produtos" module on
+        ``/campos-customizados/modulos``.
 
-        Bling V3 returns custom fields embedded in /produtos/{id} responses
-        as ``[{"idCampoCustomizado": <id>, "valor": <value>}]`` — i.e. only
-        the ID, not the human-readable name. To translate IDs to names we
-        hit this catalog endpoint once at sync start.
+        Bling V3 organizes custom fields by module (Produtos, Pedidos,
+        Contatos, etc.). The id of "Produtos" is determined by the tenant's
+        configuration — there's no documented stable id — so we list
+        modules and match by NAME (case + accent insensitive). Cached on
+        ``self._produtos_module_id`` so we only pay the discovery cost once
+        per BlingClient instance.
 
-        Returns ``[]`` if the endpoint is missing (some Bling builds expose
-        it under different paths) so the sync can still proceed; the agent
-        will just fall back to ``campo_<id>`` keys in that case.
+        Returns the int id, or None when the module isn't found / the
+        endpoint fails / the user hasn't granted the scope. None signals
+        the caller to degrade gracefully (synthetic ``campo_<id>`` keys).
         """
-        for path in ("/produtos/campos-customizados", "/campos-customizados"):
-            try:
-                data = await self._request("GET", path)
-                items = data.get("data")
-                if isinstance(items, list):
-                    return items
-            except BlingError as exc:
-                logger.info("bling_custom_fields_catalog_miss path=%s err=%s", path, exc)
+        if self._produtos_module_id is not None:
+            return self._produtos_module_id
+
+        try:
+            data = await self._request("GET", "/campos-customizados/modulos")
+        except BlingError as exc:
+            logger.info(
+                "bling_custom_fields_modules_failed err=%.120s "
+                "(degrading to campo_<id> synthetic keys)",
+                str(exc),
+            )
+            return None
+
+        modules = data.get("data")
+        if not isinstance(modules, list):
+            logger.info(
+                "bling_custom_fields_modules_invalid_shape keys=%s",
+                sorted(data.keys()) if isinstance(data, dict) else type(data).__name__,
+            )
+            return None
+
+        # Case + accent insensitive match against the displayed module name.
+        # Bling shows "Produtos" today; defensive against "produtos" or
+        # accented future variants.
+        def _norm(s: str) -> str:
+            n = unicodedata.normalize("NFD", (s or "").lower())
+            return "".join(c for c in n if unicodedata.category(c) != "Mn")
+
+        target = _norm("Produtos")
+        for m in modules:
+            if not isinstance(m, dict):
                 continue
-        return []
+            name = m.get("nome") or m.get("name") or ""
+            if _norm(str(name)) == target:
+                try:
+                    self._produtos_module_id = int(m.get("id"))
+                except (TypeError, ValueError):
+                    continue
+                logger.info(
+                    "bling_custom_fields_module_found id=%d nome=%r",
+                    self._produtos_module_id, name,
+                )
+                return self._produtos_module_id
+
+        logger.info(
+            "bling_custom_fields_module_not_found "
+            "available_modules=%s",
+            [
+                str(m.get("nome") or m.get("name") or "")
+                for m in modules
+                if isinstance(m, dict)
+            ][:20],
+        )
+        return None
+
+    async def listar_campos_customizados(self) -> list[dict[str, Any]]:
+        """Sprint 2.5.2 / 2.7.4 — fetch the catalog of custom-field definitions
+        for the Produtos module.
+
+        Bling V3 actually exposes this at ``/campos-customizados/modulos/{idModulo}``
+        (not ``/produtos/campos-customizados`` like Sprint 2.5.2 guessed).
+        Two HTTP calls per sync — both cached by lazy memoization:
+
+            1. discover the Produtos module id once
+            2. page through that module's custom fields (limite=100,
+               loop until a short page comes back)
+
+        Each item in the response shape ``[{id, nome, situacao}, ...]``.
+        We filter ``situacao == "A"`` (active) so deactivated fields don't
+        contaminate the field_map.
+
+        Returns ``[]`` on any failure — discovery error, module not found,
+        list endpoint 4xx, etc. The sync then falls back to synthetic
+        ``campo_<id>`` keys so the bridge to ``atributos_parseados`` still
+        works (just without human labels). This preserves Sprint 2.5.2's
+        graceful degradation contract.
+        """
+        module_id = await self._find_produtos_module_id()
+        if module_id is None:
+            return []
+
+        results: list[dict[str, Any]] = []
+        pagina = 1
+        page_size = 100
+        # Defensive cap: 50 pages × 100 = 5000 fields, well past any real
+        # tenant. Prevents an infinite loop if Bling ever returns
+        # full-page indefinitely.
+        _MAX_PAGES = 50
+
+        while pagina <= _MAX_PAGES:
+            try:
+                data = await self._request(
+                    "GET",
+                    f"/campos-customizados/modulos/{module_id}",
+                    params={"pagina": pagina, "limite": page_size},
+                )
+            except BlingError as exc:
+                logger.info(
+                    "bling_custom_fields_list_failed module_id=%d pagina=%d "
+                    "err=%.120s (degrading to campo_<id> synthetic keys)",
+                    module_id, pagina, str(exc),
+                )
+                return []
+
+            page = data.get("data")
+            if not isinstance(page, list):
+                logger.info(
+                    "bling_custom_fields_list_invalid_shape pagina=%d "
+                    "keys=%s",
+                    pagina,
+                    sorted(data.keys()) if isinstance(data, dict) else type(data).__name__,
+                )
+                break
+
+            # Filter ``situacao == "A"`` (active only). When situacao is
+            # absent we keep the field defensively — tenants on older
+            # builds may not surface the field.
+            for item in page:
+                if not isinstance(item, dict):
+                    continue
+                situacao = str(item.get("situacao") or "A").strip().upper()
+                if situacao and situacao != "A":
+                    continue
+                results.append(item)
+
+            # Short page (or empty) → last page reached.
+            if len(page) < page_size:
+                break
+            pagina += 1
+
+        logger.info(
+            "bling_custom_fields_list_done module_id=%d total_active=%d pages=%d",
+            module_id, len(results), pagina,
+        )
+        return results

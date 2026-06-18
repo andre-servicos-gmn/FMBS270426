@@ -137,24 +137,49 @@ async def test_discovery_caches_module_id():
 
 @pytest.mark.asyncio
 async def test_list_returns_active_fields_only():
-    """Sprint 2.7.4: situacao != 'A' is filtered out."""
+    """Sprint 2.7.4.1: real Bling V3 ``situacao`` is INT (1=ativo, 0=inativo)
+    — not the string "A"/"I" we assumed initially. Filter keeps int 1
+    and drops int 0."""
     client = BlingClient()
     client._produtos_module_id = 42  # skip discovery
 
     with patch.object(
         BlingClient, "_request", new_callable=AsyncMock,
         return_value=_fields_page([
-            {"id": 100, "nome": "Peso", "situacao": "A"},
-            {"id": 101, "nome": "Composição", "situacao": "A"},
-            {"id": 102, "nome": "Campo Descontinuado", "situacao": "I"},  # filtered
-            {"id": 103, "nome": "Equilíbrio", "situacao": "A"},
+            {"id": 100, "nome": "Peso", "situacao": 1},
+            {"id": 101, "nome": "Composição", "situacao": 1},
+            {"id": 102, "nome": "Campo Descontinuado", "situacao": 0},  # filtered
+            {"id": 103, "nome": "Equilíbrio", "situacao": 1},
         ]),
     ):
         result = await client.listar_campos_customizados()
 
     names = [item["nome"] for item in result]
     assert names == ["Peso", "Composição", "Equilíbrio"]
-    assert all(item.get("situacao", "A") == "A" for item in result)
+    # All kept items have the active marker (real format: int 1).
+    assert all(item["situacao"] == 1 for item in result)
+
+
+@pytest.mark.asyncio
+async def test_list_tolerates_legacy_string_situacao():
+    """Sprint 2.7.4.1: defensive tolerance — if a future / older build
+    returns the legacy string "A"/"I", the filter still works."""
+    client = BlingClient()
+    client._produtos_module_id = 42
+
+    with patch.object(
+        BlingClient, "_request", new_callable=AsyncMock,
+        return_value=_fields_page([
+            {"id": 1, "nome": "LegacyAtivo", "situacao": "A"},
+            {"id": 2, "nome": "LegacyInativo", "situacao": "I"},  # dropped
+            {"id": 3, "nome": "BooleanAtivo", "situacao": "TRUE"},
+            {"id": 4, "nome": "BooleanInativo", "situacao": "FALSE"},  # dropped
+        ]),
+    ):
+        result = await client.listar_campos_customizados()
+
+    names = [item["nome"] for item in result]
+    assert names == ["LegacyAtivo", "BooleanAtivo"]
 
 
 @pytest.mark.asyncio
@@ -168,7 +193,7 @@ async def test_list_field_without_situacao_kept_defensively():
         BlingClient, "_request", new_callable=AsyncMock,
         return_value=_fields_page([
             {"id": 200, "nome": "Atributo Legacy"},   # no situacao
-            {"id": 201, "nome": "Outro", "situacao": "A"},
+            {"id": 201, "nome": "Outro", "situacao": 1},
         ]),
     ):
         result = await client.listar_campos_customizados()
@@ -185,8 +210,8 @@ async def test_list_paginates_when_first_page_is_full():
     client = BlingClient()
     client._produtos_module_id = 42
 
-    page1 = [{"id": i, "nome": f"Campo {i}", "situacao": "A"} for i in range(1, 101)]
-    page2 = [{"id": 101, "nome": "Campo 101", "situacao": "A"}]
+    page1 = [{"id": i, "nome": f"Campo {i}", "situacao": 1} for i in range(1, 101)]
+    page2 = [{"id": 101, "nome": "Campo 101", "situacao": 1}]
     pages = [_fields_page(page1), _fields_page(page2)]
 
     with patch.object(
@@ -215,8 +240,8 @@ async def test_list_single_short_page_terminates_quickly():
     with patch.object(
         BlingClient, "_request", new_callable=AsyncMock,
         return_value=_fields_page([
-            {"id": 1, "nome": "Peso", "situacao": "A"},
-            {"id": 2, "nome": "Marca", "situacao": "A"},
+            {"id": 1, "nome": "Peso", "situacao": 1},
+            {"id": 2, "nome": "Marca", "situacao": 1},
         ]),
     ) as mock_req:
         result = await client.listar_campos_customizados()
@@ -277,11 +302,12 @@ async def test_list_full_flow_discovery_plus_fields():
     call_sequence = [
         # 1. modules discovery
         _modules_response(produtos_id=42),
-        # 2. fields for module 42 (single short page)
+        # 2. fields for module 42 (single short page) — real Bling V3
+        #    format: situacao is INT (1=ativo, 0=inativo).
         _fields_page([
-            {"id": 1979924, "nome": "Marca", "situacao": "A"},
-            {"id": 3474356, "nome": "Composição", "situacao": "A"},
-            {"id": 9999999, "nome": "Inativo", "situacao": "I"},
+            {"id": 1979924, "nome": "Marca", "situacao": 1},
+            {"id": 3474356, "nome": "Composição", "situacao": 1},
+            {"id": 9999999, "nome": "Inativo", "situacao": 0},
         ]),
     ]
 

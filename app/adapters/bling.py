@@ -458,15 +458,24 @@ class BlingClient:
                 )
                 break
 
-            # Filter ``situacao == "A"`` (active only). When situacao is
-            # absent we keep the field defensively — tenants on older
-            # builds may not surface the field.
+            # Sprint 2.7.4.1 — Bling V3 returns ``situacao`` as INT (1=ativo,
+            # 0=inativo), confirmed against a real tenant. The initial
+            # 2.7.4 release wrongly assumed the legacy string format
+            # ("A"/"I"), so the filter discarded EVERY field. We now
+            # tolerate both formats + boolean stringification so any
+            # build-variant works:
+            #   * 1 / "1" / "A" / "TRUE"  → active, keep
+            #   * 0 / "0" / "I" / "FALSE" → inactive, drop
+            #   * missing / None          → keep (defensive for older builds
+            #                                that don't surface the field)
             for item in page:
                 if not isinstance(item, dict):
                     continue
-                situacao = str(item.get("situacao") or "A").strip().upper()
-                if situacao and situacao != "A":
-                    continue
+                sit_raw = item.get("situacao")
+                if sit_raw is not None:
+                    sit_str = str(sit_raw).strip().upper()
+                    if sit_str not in ("1", "A", "TRUE"):
+                        continue
                 results.append(item)
 
             # Short page (or empty) → last page reached.

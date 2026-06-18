@@ -54,6 +54,17 @@ logger = logging.getLogger(__name__)
 # so "qual o peso?" doesn't accidentally match a "composicao" trigger).
 
 _ATTRIBUTE_TRIGGERS: list[tuple[str, tuple[str, ...]]] = [
+    # Sprint 2.7.5 — marca/modelo added because the Felipe production
+    # catalog stores them as Bling custom fields, and the agent had no
+    # slug for either. Listed FIRST so "qual a marca?" can't be hijacked
+    # by a later "material" trigger.
+    ("marca", (
+        "marca", "qual marca", "qual a marca", "fabricante",
+        "fabricado por",
+    )),
+    ("modelo", (
+        "modelo", "qual modelo", "qual o modelo", "que modelo",
+    )),
     ("peso", (
         "peso", "pesa", "pesada", "pesado", "gramas", "kilo", "quilos",
         "quao pesado", "quao pesada",
@@ -76,7 +87,7 @@ _ATTRIBUTE_TRIGGERS: list[tuple[str, tuple[str, ...]]] = [
         "quantos k", "k de carbono", "k de fibra",
     )),
     ("espessura", (
-        "espessura", "grossura", "perfil grosso", "fino",
+        "espessura", "grossura", "perfil grosso", "fino", "perfil",
     )),
     ("comprimento", (
         "comprimento", "cumprimento", "tamanho", "altura",
@@ -85,6 +96,48 @@ _ATTRIBUTE_TRIGGERS: list[tuple[str, tuple[str, ...]]] = [
         "detalhamento", "detalhe tecnico", "detalhe técnico", "especificacao",
     )),
 ]
+
+# Sprint 2.7.5 — mapeamento slug-canônico → lista de chaves REAIS que valem
+# como esse atributo nos produtos. Substitui o ``[slug, slug_aproximado,
+# slug_total]`` hardcoded da Sprint 2.6.6, que falhava quando o Bling
+# custom field tinha um nome diferente do slug (caso real: campo
+# ``materiais_do_exterior`` carregando o material da raquete, e o
+# matcher só procurava por ``composicao``).
+#
+# Ordem importa: primeira chave que retornar valor "meaningful" vence.
+# Coloca o nome do Bling V3 PRIMEIRO (mais específico/recente), depois
+# slugs legados como fallback de compatibilidade.
+_SLUG_FIELD_CANDIDATES: dict[str, list[str]] = {
+    "marca":        ["marca"],
+    "modelo":       ["modelo"],
+    "peso":         ["peso", "peso_aproximado", "peso_total", "peso_g", "peso_gramas"],
+    "equilibrio":   ["equilibrio", "balance", "balanco"],
+    "composicao":   ["materiais_do_exterior", "composicao", "material", "materiais"],
+    "espessura":    ["espessura_do_perfil_mm", "espessura", "espessura_perfil"],
+    "comprimento":  ["comprimento", "comprimento_cm", "tamanho_cm"],
+    "detalhamento": ["detalhamento"],
+}
+
+# Sprint 2.7.5 — chaves que NUNCA podem virar resposta de ficha técnica.
+# São controle interno (es_raquete_de_praia, já consumido em
+# is_raquete_praia bool), abreviação interna sem sentido pro cliente
+# (material_am = "car"), ou ruído de marketplace (baterias_sao_necessarias).
+# Filtradas em ``_read_attribute`` E em ``_list_available_attributes``
+# como defesa em profundidade.
+_BLOCKED_KEYS: frozenset[str] = frozenset({
+    "material_am",
+    "es_raquete_de_praia",
+    "baterias_sao_necessarias",
+    "baterias_necessarias",
+    "baterias",
+})
+
+# Sprint 2.7.5 — valores que NUNCA são apresentáveis como ficha técnica
+# mesmo quando a chave passa pela blocklist. Cobre booleanos como string
+# (Bling/marketplaces enviam "true"/"false") e nulos serializados.
+_BOOLEAN_OR_NULL_VALUES: frozenset[str] = frozenset({
+    "true", "false", "none", "null", "nan",
+})
 
 # Generic "give me the full spec" patterns — list all available attributes.
 _FULL_SPEC_TRIGGERS = (
@@ -119,6 +172,8 @@ def is_broad_detail_request(text: str) -> bool:
 
 # Human labels used in the rendered answer.
 _HUMAN_LABELS: dict[str, str] = {
+    "marca": "Marca",
+    "modelo": "Modelo",
     "peso": "Peso",
     "equilibrio": "Equilíbrio",
     "composicao": "Composição",
@@ -132,6 +187,8 @@ _HUMAN_LABELS: dict[str, str] = {
 # não consta..."). Felipe's print showed "O ficha técnica" — clearly
 # broken concordance — because we used a hardcoded "O" everywhere.
 _ARTICLE: dict[str, str] = {
+    "marca": "A",
+    "modelo": "O",
     "peso": "O",
     "equilibrio": "O",
     "composicao": "A",
@@ -224,32 +281,99 @@ def get_active_product(state: AgentState) -> dict | None:
     return products[0] if len(products) == 1 else None
 
 
+def _is_meaningful_value(v: Any) -> bool:
+    """Sprint 2.7.5 — does this raw value qualify as user-facing ficha?
+
+    Drops:
+      - None
+      - empty / whitespace-only strings
+      - boolean-stringified values ("true"/"false") that leak from
+        marketplace integrations and internal flags
+      - serialized null markers ("none"/"null"/"nan")
+
+    Defense in depth: even if a key escapes ``_BLOCKED_KEYS``, this
+    value gate prevents nonsense ending up in front of the customer.
+    """
+    if v is None:
+        return False
+    s = str(v).strip()
+    if not s:
+        return False
+    if s.lower() in _BOOLEAN_OR_NULL_VALUES:
+        return False
+    return True
+
+
+def _format_value(slug: str, raw: str) -> str:
+    """Sprint 2.7.5 — append the canonical unit to numeric values when the
+    Bling sync stored them bare.
+
+    The Felipe catalog stores ``espessura_do_perfil_mm: "22"`` (a bare
+    integer, with the unit baked into the column NAME). The customer
+    expects to see "22mm" not "22". This helper appends "mm"/"g"/"cm"
+    only when the raw value is pure-numeric — values that already carry
+    a letter (like "320g" from the description parser) are preserved
+    untouched.
+    """
+    s = str(raw).strip()
+    if not s:
+        return s
+    # If the value already has any letter, assume the unit is embedded.
+    if any(c.isalpha() for c in s):
+        return s
+    # Pure numeric (digits, comma, dot, minus, plus, parens, spaces) →
+    # append the canonical unit for the slug.
+    _UNIT_BY_SLUG: dict[str, str] = {
+        "espessura": "mm",
+        "peso": "g",
+        "comprimento": "cm",
+    }
+    unit = _UNIT_BY_SLUG.get(slug)
+    return f"{s}{unit}" if unit else s
+
+
 def _read_attribute(product: dict, slug: str) -> str | None:
     """Read ``slug`` from the product's ``atributos_parseados`` dict.
 
-    Tolerates a few common key-shape variations (e.g. "peso" vs
-    "peso_aproximado"). Returns None when the attribute is genuinely
-    missing.
+    Sprint 2.7.5 — uses ``_SLUG_FIELD_CANDIDATES`` to iterate the list of
+    real keys that count as this attribute. Skips ``_BLOCKED_KEYS``
+    entirely. Returns the FORMATTED value (with unit appended for bare
+    numerics) or None when nothing meaningful is found.
     """
     attrs = product.get("atributos_parseados") or {}
     if not isinstance(attrs, dict):
         return None
-    candidates = [slug, f"{slug}_aproximado", f"{slug}_total"]
-    for k in candidates:
-        v = attrs.get(k)
-        if v not in (None, ""):
-            return str(v)
-    # Some sync builds may have stored alternate spellings; check the
-    # human label too, accent-stripped.
+
+    # 1. Slug-specific candidate chain (the curated list per slug). First
+    # meaningful value wins, ordered by specificity.
+    candidates = _SLUG_FIELD_CANDIDATES.get(slug, [slug])
+    for key in candidates:
+        if key in _BLOCKED_KEYS:
+            continue
+        v = attrs.get(key)
+        if _is_meaningful_value(v):
+            return _format_value(slug, str(v))
+
+    # 2. Full-scan fallback — same accent-insensitive contract as 2.6.6,
+    # but now respecting both the key blocklist and the value gate.
     target = _norm(slug)
-    for k, v in attrs.items():
-        if _norm(str(k)) == target and v not in (None, ""):
-            return str(v)
+    for key, value in attrs.items():
+        if key in _BLOCKED_KEYS:
+            continue
+        if _norm(str(key)) == target and _is_meaningful_value(value):
+            return _format_value(slug, str(value))
+
     return None
 
 
 def _list_available_attributes(product: dict) -> dict[str, str]:
-    """Return the subset of known attributes that have a value."""
+    """Return the subset of known attributes that have a value.
+
+    Sprint 2.7.5 — the per-slug read goes through ``_read_attribute``,
+    which already enforces both the key blocklist and the value gate,
+    so ``material_am`` / ``es_raquete_de_praia`` / ``true``/``false``
+    NEVER leak into a broad-detail listing.
+    """
     out: dict[str, str] = {}
     for slug, _ in _ATTRIBUTE_TRIGGERS:
         v = _read_attribute(product, slug)
@@ -324,6 +448,11 @@ def _render_found(product: dict, slug: str, value: str) -> str:
         return f"O equilíbrio da *{name}* é {value}."
     if slug == "composicao":
         return f"A *{name}* é feita de {value}."
+    # Sprint 2.7.5 — marca/modelo natural phrasing.
+    if slug == "marca":
+        return f"A marca da *{name}* é *{value}*."
+    if slug == "modelo":
+        return f"O modelo é *{value}*."
     label = _HUMAN_LABELS.get(slug, slug.capitalize())
     return f"{label} da *{name}*: {value}."
 

@@ -95,6 +95,8 @@ Categorias:
                        implícita ("qual o peso?", "qual o balance dela?", \
                        "de que material é?", "qual a composição?", "qual a \
                        espessura?", "quanto pesa?", "qual o comprimento?", \
+                       "qual a marca?", "qual a marca dela?", "de que marca \
+                       é?", "qual o modelo?", "qual o fabricante?", \
                        "me fala a ficha técnica"). \
                        TAMBÉM cobre PEDIDOS AMPLOS de informação sobre o \
                        produto ativo, sem nomear atributo específico: \
@@ -171,7 +173,24 @@ c) Agente acabou de confirmar um produto ("Sim, temos a Mormaii Sunset") \
    e o cliente diz "Quanto custa?" / "Preço?" → price_inquiry (preço do \
    produto ATIVO, contexto recente).
 
-d) Quando NÃO há contexto relevante OU a mensagem do cliente é um \
+d) DESAMBIGUAÇÃO MARCA/MODELO (Sprint 2.7.6 — CRÍTICA):
+   Pergunta SINGULAR sobre marca/modelo COM PRODUTO ATIVO no contexto \
+   ("qual a marca?", "qual o modelo?", "qual a marca dela?", "de que \
+   marca é?", "qual o fabricante?") → SEMPRE attribute_inquiry. O \
+   cliente quer a marca/modelo DAQUELE produto que está na conversa, \
+   não uma pergunta de catálogo. NUNCA classifique como faq quando \
+   há produto recém-confirmado.
+
+   DISTINÇÃO chave (singular+produto-ativo = atributo; plural+catálogo = faq):
+   - "qual a marca [dela]?" / "qual o modelo?" / "de que marca é?" \
+     → attribute_inquiry (atributo do produto ATIVO).
+   - "quais marcas vocês trabalham?" / "trabalham com quais marcas?" / \
+     "que marcas vocês vendem?" → faq (pergunta de CATÁLOGO geral, \
+     plural, sem produto ativo específico).
+   - Sem produto ativo no histórico recente E pergunta singular vaga \
+     ("qual a marca?") → faq (ambíguo, melhor o handoff).
+
+e) Quando NÃO há contexto relevante OU a mensagem do cliente é um \
    cumprimento isolado ("oi", "bom dia"), classifique como smalltalk \
    normalmente.
 

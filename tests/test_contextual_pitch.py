@@ -251,17 +251,6 @@ def test_pitch_appears_max_once_per_conversation():
     assert "consultoria_mentioned_count" not in update2
 
 
-@pytest.mark.skip(reason="customer_intent_path removed in Sprint 2.6")
-def test_pitch_not_emitted_for_exploring_path():
-    state = _state(customer_intent_path="exploring")
-    blocks, update = maybe_add_subtle_consultoria_offer(
-        state, ["resposta"], QuestionType.PRICE
-    )
-    assert blocks == ["resposta"]
-    # Exploring path doesn't even tick the determined counter.
-    assert "determined_question_count" not in update
-
-
 def test_pitch_not_emitted_during_handoff():
     state = _state(needs_handoff=True)
     blocks, update = maybe_add_subtle_consultoria_offer(
@@ -386,21 +375,3 @@ async def test_product_detail_comfort_emits_immediate_pitch():
     full = " ".join(result["response_blocks"])
     assert "Conforto e prevenção de lesão" in full  # COMFORT preset opener
     assert result.get("consultoria_mentioned_count") == 1
-@pytest.mark.skip(reason="customer_intent_path removed in Sprint 2.6")
-
-
-@pytest.mark.asyncio
-async def test_price_inquiry_no_pitch_for_exploring_customer():
-    """Regression: exploring customers never see the subtle pitch."""
-    from app.agent.nodes.price_inquiry import price_inquiry_node
-
-    state = _state(
-        customer_intent_path="exploring",
-        messages=[HumanMessage(content="quanto custa?")],
-        recommended_products=[_product("Raquete X")],
-        determined_question_count=0,
-        last_recommendation_at=datetime.now(timezone.utc).isoformat(),
-    )
-    result = await price_inquiry_node(state)
-    full = " ".join(result["response_blocks"])
-    assert "Consultoria Base Sports" not in full

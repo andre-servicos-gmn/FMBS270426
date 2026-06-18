@@ -48,9 +48,26 @@ logger = logging.getLogger(__name__)
 # ── Graph singleton (MemorySaver keeps state in-process) ──────────────────────
 
 _graph = None
+# Fase 0 — supervisor V2 singleton, compilado sob demanda APENAS quando
+# settings.use_v2 está ligado. Default OFF → este caminho nunca é tocado e o
+# comportamento do webhook é idêntico ao de hoje.
+_graph_v2 = None
 
 
 def _get_graph():  # type: ignore[return]
+    # Fase 0 — branch gated pela feature flag. Com use_v2=False (default), cai
+    # direto no grafo legado abaixo, sem nenhuma mudança de comportamento. Com
+    # use_v2=True, compila/retorna o grafo do supervisor reaproveitando o MESMO
+    # checkpointer (AsyncRedisSaver) que o grafo legado usa.
+    if get_settings().use_v2:
+        global _graph_v2
+        if _graph_v2 is None:
+            from app.agent.checkpointer import get_checkpointer
+            from app.agent.supervisor import build_supervisor_graph
+            _graph_v2 = build_supervisor_graph(get_checkpointer())
+            logger.info("supervisor_v2 graph compiled (USE_V2 enabled)")
+        return _graph_v2
+
     global _graph
     if _graph is None:
         _graph = build_graph()
@@ -160,7 +177,7 @@ async def _reconnect_redis_singletons() -> None:
 
     The new graph is recompiled lazily on the next ``_get_graph()`` call.
     """
-    global _graph
+    global _graph, _graph_v2
     from app.agent.checkpointer import init_checkpointer, reset_checkpointer
     from app.storage.redis_session import reset_redis_client
 
@@ -169,6 +186,9 @@ async def _reconnect_redis_singletons() -> None:
     # Rebuild checkpointer immediately so the next graph compile uses it.
     await init_checkpointer()
     _graph = None
+    # Fase 0 — também invalida o grafo v2 (segura o mesmo saver) se a flag
+    # estiver ligada; com use_v2=False ele já é None e isto é no-op.
+    _graph_v2 = None
     logger.info("redis_singletons_reconnected (next request rebuilds graph)")
 
 

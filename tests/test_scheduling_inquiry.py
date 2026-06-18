@@ -48,19 +48,6 @@ def _state(*, post_rec: bool = False) -> AgentState:
 
 # ── Triage prompt content (disambiguation) ───────────────────────────────────
 
-@pytest.mark.skip(reason="triage prompt rewritten in Sprint 2.6")
-def test_consultoria_vs_scheduling_disambiguation_in_prompt():
-    """SYSTEM_TRIAGE must list both intents AND show explicit disambiguation."""
-    from app.agent.prompts import SYSTEM_TRIAGE
-    s = SYSTEM_TRIAGE.lower()
-    assert "scheduling_inquiry" in s
-    assert "consultoria" in s
-    # The "EXEMPLOS DE DESAMBIGUAÇÃO" block must be present.
-    assert "desambiguação" in s or "desambiguacao" in s
-    # Specific pairs that must be in the prompt for the LLM to learn the split.
-    assert "como agendo" in s
-    assert "como funciona a consultoria" in s
-
 
 def test_scheduling_inquiry_classified_after_pitch():
     """Triage router accepts scheduling_inquiry regardless of post_rec state."""
@@ -108,52 +95,6 @@ async def test_scheduling_inquiry_returns_canned_response():
 
 
 # ── Override determinístico: cliente nomeia raquete já mostrada ──────────────
-
-@pytest.mark.skip(reason="post-rec router override removed in Sprint 2.6")
-def test_product_selection_override_when_naming_recommended():
-    """If triage classifies as recommend but the customer's last message names
-    a product already in recommended_products, _triage_router OVERRIDES to
-    product_selection — this is the deterministic fix for the rerun-cego bug."""
-    from app.agent.graph import _triage_router
-
-    state: AgentState = {  # type: ignore[typeddict-item]
-        "messages": [HumanMessage(content="gostei da BeachPro Carbon X5")],
-        "phone_hash": "override" * 8,
-        "intent": "recommend",  # LLM mistakenly emitted this
-        "player_profile": {},
-        "recommended_products": [
-            {"name": "Raquete BeachPro Carbon X5", "price_cents": 89900},
-            {"name": "Raquete AirBlast Pro", "price_cents": 119900},
-        ],
-        "needs_handoff": False,
-        "handoff_reason": None,
-        "consultoria_interest": False,
-        "last_recommendation_at": datetime.now(timezone.utc).isoformat(),
-    }
-    # Override should activate and route to product_selection.
-    assert _triage_router(state) == "product_selection"
-
-
-@pytest.mark.skip(reason="post-rec router override removed in Sprint 2.6")
-def test_product_selection_no_override_when_no_match():
-    """If the message doesn't name any recommended product, no override —
-    keep the legacy recommend_rerun routing."""
-    from app.agent.graph import _triage_router
-
-    state: AgentState = {  # type: ignore[typeddict-item]
-        "messages": [HumanMessage(content="quero ver mais opções")],
-        "phone_hash": "noover" * 10,
-        "intent": "recommend",
-        "player_profile": {},
-        "recommended_products": [
-            {"name": "Raquete BeachPro Carbon X5", "price_cents": 89900},
-        ],
-        "needs_handoff": False,
-        "handoff_reason": None,
-        "consultoria_interest": False,
-        "last_recommendation_at": datetime.now(timezone.utc).isoformat(),
-    }
-    assert _triage_router(state) == "recommend_rerun"
 
 
 # Sprint 2.0 — the exhibited-only filter in recommend was removed: PROFILE

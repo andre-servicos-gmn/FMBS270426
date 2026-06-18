@@ -175,191 +175,20 @@ async def test_smalltalk_skips_name_ask_when_already_captured():
 # 2. BARE RECOMMENDATION REQUEST INTENT
 # ════════════════════════════════════════════════════════════════════════════
 
-@pytest.mark.skip(reason="intent removed in Sprint 2.6")
-def test_bare_recommendation_request_in_triage_intent_set():
-    """The new intent must be in _VALID_INTENTS so triage doesn't demote it."""
-    from app.agent.nodes.triage import _VALID_INTENTS
-    assert "bare_recommendation_request" in _VALID_INTENTS
-
-
-@pytest.mark.skip(reason="intent removed in Sprint 2.6")
-def test_triage_prompt_lists_bare_recommendation_request():
-    """The prompt must teach the LLM the new category."""
-    from app.agent.prompts import SYSTEM_TRIAGE
-    assert "bare_recommendation_request" in SYSTEM_TRIAGE
-
-
-@pytest.mark.skip(reason="intent removed in Sprint 2.6")
-def test_triage_router_remaps_bare_recommendation_to_recommend():
-    """The router transforms bare_recommendation_request → recommend path."""
-    from app.agent.graph import _triage_router
-
-    state: AgentState = {  # type: ignore[typeddict-item]
-        "messages": [HumanMessage(content="qual você indica?")],
-        "phone_hash": "bareroute" * 7,
-        "intent": "bare_recommendation_request",
-        "player_profile": {},
-        "recommended_products": [],
-        "needs_handoff": False,
-        "handoff_reason": None,
-        "consultoria_interest": False,
-    }
-    # Classical state (no products) → "recommend" → mapped to "diagnose" in edges.
-    assert _triage_router(state) == "recommend"
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # 3. REFERENCE-SIM — racket exists
 # ════════════════════════════════════════════════════════════════════════════
-@pytest.mark.skip(reason="REFERENCE-SIM mode removed in Sprint 2.6")
-
-@pytest.mark.asyncio
-async def test_reference_sim_only_keeps_matched_product_in_shortlist():
-    """REFERENCE-SIM never lists alternatives — only the matched racket survives."""
-    from app.agent.nodes.recommend import recommend_node
-
-    candidates = [
-        _product("Raquete BeachPro Carbon X5"),  # the matched one
-        _product("Raquete A"),
-        _product("Raquete B"),
-    ]
-    state = _profile_state(modelo="BeachPro Carbon X5")
-
-    with patch("app.adapters.openai_client.OpenAIClient.chat", new_callable=AsyncMock) as llm:
-        llm.return_value = json.dumps({
-            "messages": [
-                "Sim, temos a *Raquete BeachPro Carbon X5* aqui!",
-                "Quer saber preço, peso, indicação, ou já fechamos?",
-            ]
-        })
-        with patch("app.rag.retriever.search_products", new_callable=AsyncMock) as search:
-            search.return_value = candidates
-            with patch("app.storage.db.get_session", _mock_db_session):
-                result = await recommend_node(state)
-
-    shortlist = result["recommended_products"]
-    assert len(shortlist) == 1
-    assert shortlist[0]["name"] == "Raquete BeachPro Carbon X5"
-    # produto_pesquisado is recorded for dossier rendering.
-    assert result["produto_pesquisado"] == "BeachPro Carbon X5"
-@pytest.mark.skip(reason="REFERENCE-SIM mode removed in Sprint 2.6")
-
-
-@pytest.mark.asyncio
-async def test_reference_sim_context_signals_have_stock():
-    """The user-message context must declare 'Modo: REFERENCE-SIM' + 'TEMOS NO ESTOQUE'."""
-    from app.agent.nodes.recommend import recommend_node
-
-    candidates = [_product("Raquete BeachPro Carbon X5")]
-    state = _profile_state(modelo="BeachPro Carbon X5")
-
-    with patch("app.adapters.openai_client.OpenAIClient.chat", new_callable=AsyncMock) as llm:
-        llm.return_value = json.dumps({"messages": ["Sim, temos!"]})
-        with patch("app.rag.retriever.search_products", new_callable=AsyncMock) as search:
-            search.return_value = candidates
-            with patch("app.storage.db.get_session", _mock_db_session):
-                await recommend_node(state)
-
-    user_ctx = llm.call_args.kwargs["messages"][-1]["content"]
-    assert "Modo: REFERENCE-SIM" in user_ctx
-    assert "TEMOS NO ESTOQUE" in user_ctx
 
 
 # ════════════════════════════════════════════════════════════════════════════
 # 4. REFERENCE-NÃO — racket missing from catalog
 # ════════════════════════════════════════════════════════════════════════════
-@pytest.mark.skip(reason="REFERENCE-NÃO mode removed in Sprint 2.6")
-
-@pytest.mark.asyncio
-async def test_reference_nao_does_not_keep_alternatives_in_shortlist():
-    """REFERENCE-NÃO clears recommended_products — no alternatives offered."""
-    from app.agent.nodes.recommend import recommend_node
-
-    # Retriever returns other products, but none match Wilson Pro Staff.
-    candidates = [_product("Raquete A"), _product("Raquete B")]
-    state = _profile_state(modelo="Wilson Pro Staff")
-
-    with patch("app.adapters.openai_client.OpenAIClient.chat", new_callable=AsyncMock) as llm:
-        llm.return_value = json.dumps({"messages": [
-            "A *Wilson Pro Staff* específica a gente não tem.",
-            "Pra encontrar a raquete certa, oferecemos a *Consultoria Base Sports* (R$350).",
-            "Quer saber como funciona?",
-        ]})
-        with patch("app.rag.retriever.search_products", new_callable=AsyncMock) as search:
-            search.return_value = candidates
-            with patch("app.storage.db.get_session", _mock_db_session):
-                result = await recommend_node(state)
-
-    assert result["recommended_products"] == []
-    assert result["consultoria_interest"] is True
-    assert result["produto_pesquisado"] == "Wilson Pro Staff"
-@pytest.mark.skip(reason="REFERENCE-NÃO mode removed in Sprint 2.6")
-
-
-@pytest.mark.asyncio
-async def test_reference_nao_context_signals_missing_and_has_consultoria_price():
-    """REFERENCE-NÃO context tells the LLM: not in catalog + consultoria price."""
-    from app.agent.nodes.recommend import recommend_node
-
-    state = _profile_state(modelo="Babolat Pure")
-    with patch("app.adapters.openai_client.OpenAIClient.chat", new_callable=AsyncMock) as llm:
-        llm.return_value = json.dumps({"messages": ["nao tem", "consultoria"]})
-        with patch("app.rag.retriever.search_products", new_callable=AsyncMock) as search:
-            search.return_value = []  # nothing matches
-            with patch("app.storage.db.get_session", _mock_db_session):
-                await recommend_node(state)
-
-    user_ctx = llm.call_args.kwargs["messages"][-1]["content"]
-    assert "Modo: REFERENCE-NÃO" in user_ctx
-    assert "NÃO TEMOS NO CATÁLOGO" in user_ctx
-    assert "R$" in user_ctx  # the consultoria investment line
 
 
 # ════════════════════════════════════════════════════════════════════════════
 # 5. PROFILE — no model → consultoria_offer
 # ════════════════════════════════════════════════════════════════════════════
-@pytest.mark.skip(reason="PROFILE mode removed in Sprint 2.6 — see test_help_request")
-
-@pytest.mark.asyncio
-async def test_profile_mode_delegates_to_consultoria_offer():
-    """No modelo_desejado → recommend never lists rackets; it offers the Consultoria."""
-    from app.agent.nodes.recommend import recommend_node
-
-    state = _profile_state(modelo="nenhum")
-    with patch("app.adapters.openai_client.OpenAIClient.chat", new_callable=AsyncMock) as llm:
-        llm.return_value = json.dumps({"messages": [
-            "Pelo seu perfil, vale fazermos isso com calma.",
-            "Temos a *Consultoria Base Sports* (*R$350*, 100% abatido).",
-            "Quer saber como funciona ou já agendar?",
-        ]})
-        # Retriever should NOT be called in PROFILE mode.
-        with patch("app.rag.retriever.search_products", new_callable=AsyncMock) as search:
-            with patch("app.storage.db.get_session", _mock_db_session):
-                result = await recommend_node(state)
-
-    search.assert_not_called()
-    assert result["consultoria_interest"] is True
-    full = " ".join(result["response_blocks"])
-    # The pitch must carry the price + abatimento signal.
-    assert "350" in full
-    assert "abatido" in full.lower() or "abate" in full.lower()
-@pytest.mark.skip(reason="PROFILE mode removed in Sprint 2.6")
-
-
-@pytest.mark.asyncio
-async def test_profile_mode_uses_customer_name_when_available():
-    """When customer_name is set, the consultoria_offer user context carries it."""
-    from app.agent.nodes.recommend import recommend_node
-
-    state = _profile_state(modelo="nenhum", customer_name="Andre")
-    with patch("app.adapters.openai_client.OpenAIClient.chat", new_callable=AsyncMock) as llm:
-        llm.return_value = json.dumps({"messages": ["Andre, pelo seu perfil…", "consultoria", "agendar?"]})
-        with patch("app.rag.retriever.search_products", new_callable=AsyncMock):
-            with patch("app.storage.db.get_session", _mock_db_session):
-                await recommend_node(state)
-
-    user_ctx = llm.call_args.kwargs["messages"][-1]["content"]
-    assert "Andre" in user_ctx
 
 
 @pytest.mark.asyncio

@@ -43,6 +43,10 @@ include = ["app*", "tests*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "deterministic: fast, no network, no real LLM (the default safety net)",
+    "llm: hits the real gpt-4o-mini (network, may vary) — assert behavior/keywords, never exact text",
+]
 
 [tool.ruff]
 line-length = 100

@@ -129,81 +129,6 @@ def _last_system_prompt(mock) -> str:
     """Return the system prompt passed to the most recent OpenAIClient.chat call."""
     last_call = mock.call_args_list[-1]
     return last_call.kwargs.get("system") or last_call.args[1]
-@pytest.mark.skip(reason="close node removed from graph in Sprint 2.6")
-
-
-@pytest.mark.asyncio
-async def test_close_node_includes_store_info_when_configured(memory_graph, monkeypatch):
-    """When STORE_* env vars are set, build_close_prompt injects them in the system prompt."""
-    monkeypatch.setenv("STORE_NAME", "Base Sports Pinheiros")
-    monkeypatch.setenv("STORE_ADDRESS", "Rua dos Pinheiros, 100 — Pinheiros, São Paulo")
-    monkeypatch.setenv("STORE_HOURS", "Seg–Sáb 10h às 20h")
-    monkeypatch.setenv("STORE_MAPS_URL", "https://maps.app.goo.gl/example")
-    monkeypatch.setenv("STORE_PHONE", "11 4002-8922")
-
-    # Seed state directly through a close intent. The recommend node already ran
-    # (recommended_products populated) so the router will go via "close".
-    initial = AgentState(
-        messages=[HumanMessage(content="quero a beachpro carbon x5")],
-        phone_hash="storehash" * 8,
-        intent=None,
-        player_profile={},
-        recommended_products=[{"name": "Raquete BeachPro Carbon X5", "price_cents": 89900}],
-        needs_handoff=False,
-        handoff_reason=None,
-        consultoria_interest=False,
-    )
-
-    with patch("app.adapters.openai_client.OpenAIClient.chat", new_callable=AsyncMock) as mock:
-        mock.side_effect = [
-            '{"intent": "close"}',  # triage classifies
-            "Boa escolha! Te espera na Base Sports Pinheiros.",  # close_node response
-        ]
-        await memory_graph.ainvoke(initial, _config("t-close-store-1"))
-
-    # The close_node was the 2nd LLM call — its system prompt must carry every store field.
-    system_prompt = _last_system_prompt(mock)
-    assert "Base Sports Pinheiros" in system_prompt
-    assert "Rua dos Pinheiros, 100 — Pinheiros, São Paulo" in system_prompt
-    assert "Seg–Sáb 10h às 20h" in system_prompt
-    assert "https://maps.app.goo.gl/example" in system_prompt
-    assert "11 4002-8922" in system_prompt
-@pytest.mark.skip(reason="close node removed from graph in Sprint 2.6")
-
-
-@pytest.mark.asyncio
-async def test_close_node_falls_back_when_store_info_empty(memory_graph, monkeypatch):
-    """With every STORE_* empty, no placeholder/empty marker leaks into the system prompt."""
-    for var in ("STORE_NAME", "STORE_ADDRESS", "STORE_HOURS", "STORE_MAPS_URL", "STORE_PHONE"):
-        monkeypatch.delenv(var, raising=False)
-
-    initial = AgentState(
-        messages=[HumanMessage(content="quero essa")],
-        phone_hash="storehash" * 8,
-        intent=None,
-        player_profile={},
-        recommended_products=[{"name": "Raquete BeachPro Carbon X5", "price_cents": 89900}],
-        needs_handoff=False,
-        handoff_reason=None,
-        consultoria_interest=False,
-    )
-
-    with patch("app.adapters.openai_client.OpenAIClient.chat", new_callable=AsyncMock) as mock:
-        mock.side_effect = [
-            '{"intent": "close"}',
-            "Boa escolha! Passa aqui na loja para garantir.",
-        ]
-        await memory_graph.ainvoke(initial, _config("t-close-store-2"))
-
-    system_prompt = _last_system_prompt(mock)
-    # Neither the raw placeholder nor any "[vazio]"/None markers can leak through.
-    assert "{store_block}" not in system_prompt
-    assert "{store_name}" not in system_prompt
-    assert "{store_address}" not in system_prompt
-    assert "[vazio]" not in system_prompt.lower()
-    assert "none" not in system_prompt.lower().split()  # token-level — avoids false positives like "Telefone"
-    # Fallback instruction must be present so the LLM knows to invite generically.
-    assert "não foram configurados" in system_prompt
 
 
 # NOTE: Sprint 1.8 deletion. test_diagnose_complete_routes_to_recommend and
@@ -214,45 +139,6 @@ async def test_close_node_falls_back_when_store_info_empty(memory_graph, monkeyp
 
 
 # ── handoff ───────────────────────────────────────────────────────────────────
-@pytest.mark.skip(reason="intent set rewritten in Sprint 2.6")
-
-@pytest.mark.asyncio
-async def test_handoff_sets_flag_and_returns_specialist_message(memory_graph):
-    # Sprint 2.2 — handoff_node now also drives the dossier pipeline which
-    # makes one LLM call to summarize the conversation. So 2 LLM calls in
-    # total: triage + summarize_conversation.
-    side_effects = [
-        '{"intent": "handoff"}',
-        "Resumo: cliente pediu atendimento humano.",
-    ]
-
-    with patch("app.adapters.openai_client.OpenAIClient.chat", new_callable=AsyncMock) as mock:
-        mock.side_effect = side_effects
-        with patch("app.storage.db.get_session", _mock_db_session):
-            result = await memory_graph.ainvoke(
-                _initial_state("quero falar com um atendente humano"), _config("t-handoff-1")
-            )
-
-    assert result["needs_handoff"] is True
-    assert result["handoff_reason"] == "user_requested"
-    assert "especialista" in _last_ai_message(result).lower()
-    # triage + summarize_conversation; no envio efetivo porque
-    # DOSSIER_RECIPIENT_PHONE não está setado no env de teste.
-    assert mock.call_count == 2
-@pytest.mark.skip(reason="intent set rewritten in Sprint 2.6")
-
-
-@pytest.mark.asyncio
-async def test_handoff_message_exact_text(memory_graph):
-    with patch("app.adapters.openai_client.OpenAIClient.chat", new_callable=AsyncMock) as mock:
-        mock.return_value = '{"intent": "handoff"}'
-        with patch("app.storage.db.get_session", _mock_db_session):
-            result = await memory_graph.ainvoke(
-                _initial_state("preciso de ajuda humana"), _config("t-handoff-2")
-            )
-
-    msg = _last_ai_message(result)
-    assert "Vou te conectar com um especialista" in msg
 
 
 # ── triage unknown intent falls back to smalltalk ─────────────────────────────
@@ -386,22 +272,6 @@ def test_recommend_mentions_consultoria_in_final_message():
 
     prompt_off = build_recommend_prompt(_FakeSettingsOff())
     assert "NÃO é oferecida" in prompt_off or "Não mencione consultoria" in prompt_off
-
-
-@pytest.mark.skip(reason="_build_filters removed from recommend in Sprint 2.6")
-def test_recommend_does_not_filter_by_budget():
-    """_build_filters must NOT translate orcamento into a hard price filter."""
-    from app.agent.nodes.recommend import _build_filters
-
-    profile_with_budget = {
-        "esporte_praticado": "beach tennis",
-        "nivel_jogo": "intermediário",
-        "orcamento": "R$1500",  # captured spontaneously, must not become a filter
-    }
-    filters = _build_filters(profile_with_budget)
-    assert "max_price_cents" not in filters
-    # Sport filter is still derived (translated to legacy snake_case)
-    assert filters.get("sport") == "beach_tennis"
 
 
 # NOTE: Sprint 1.8 — the pre-fill guardrail tests moved to test_diagnose_flow.py

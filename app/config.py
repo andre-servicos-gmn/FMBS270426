@@ -95,8 +95,17 @@ class Settings(BaseSettings):
     # Segredo HMAC do webhook. Vazio em dev → validação desligada (LOG WARNING).
     bling_webhook_secret: str = Field(default="")
 
-    # Loja física — injetada no SYSTEM_CLOSE pelo build_close_prompt().
-    # Todas opcionais: se vazias, o agente usa fallback genérico no convite.
+    # Loja física — injetada no SYSTEM_CLOSE legado (build_close_prompt) E no
+    # bloco de identidade da loja do supervisor v2. ENDEREÇO/HORÁRIO/NOME são
+    # fatos fixos e únicos da Base Sports.
+    #
+    # Defaults VAZIOS de propósito (regra de segurança): um default fixture
+    # alimentaria o legado e o v2 com um endereço FALSO sempre que o .env de
+    # produção não preenchesse store_address — e mandar o cliente a um endereço
+    # inventado é o dano que tratamos como bloqueio. Com vazio, o legado cai no
+    # fallback genérico que já tinha, e o v2 (build_system_prompt) NÃO cita
+    # endereço, pedindo ao cliente que confirme. O André preenche os valores
+    # reais no .env / painel antes do deploy.
     store_name: str = Field(default="")
     store_address: str = Field(default="")
     store_hours: str = Field(default="")
@@ -108,6 +117,11 @@ class Settings(BaseSettings):
     # remove a menção do recommend e desativa o node de pitch.
     consultoria_preco: int = Field(default=350)
     consultoria_enabled: bool = Field(default=True)
+
+    # Fase 0 — supervisor V2 (grafo de tool-calling em paralelo ao grafo atual).
+    # Default False: o webhook continua usando o grafo switch legado. Ligar SOMENTE
+    # em dev/staging para smoke test do loop (tools ainda são stubs). Lê de USE_V2.
+    use_v2: bool = Field(default=False)
 
     # App
     app_env: Literal["development", "staging", "production"] = Field(default="development")

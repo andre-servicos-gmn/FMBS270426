@@ -141,41 +141,6 @@ async def test_product_selection_routes_to_close():
     result = await product_selection_node(state)
     assert "selected_product" in result
     assert result["selected_product"]["name"] == "Raquete AirBlast Carbon Pro"
-@pytest.mark.skip(reason="intent renamed product_selection→purchase_intent in Sprint 2.6")
-
-
-@pytest.mark.asyncio
-async def test_product_selection_routes_to_pickup_invite():
-    """Sprint 2.4 — product_selection no longer triggers handoff. It emits a
-    short pickup invite (the customer already knows the store address)."""
-    from langgraph.checkpoint.memory import MemorySaver
-
-    from app.agent.graph import build_graph
-
-    graph = build_graph(checkpointer=MemorySaver())
-    products = [
-        _product("Raquete BeachPro Carbon X5"),
-        _product("Raquete AirBlast Carbon Pro"),
-    ]
-
-    state = _post_rec_state(
-        user_msg="vou de AirBlast Carbon Pro",
-        products=products,
-    )
-
-    with patch("app.adapters.openai_client.OpenAIClient.chat", new_callable=AsyncMock) as llm:
-        # Only triage runs an LLM call — product_selection is deterministic.
-        llm.side_effect = ['{"intent": "product_selection"}']
-        result = await graph.ainvoke(
-            state, {"configurable": {"thread_id": "t-selection-purchase-1"}}
-        )
-
-    assert result.get("needs_handoff") is not True
-    assert result["selected_product"]["name"] == "Raquete AirBlast Carbon Pro"
-    final_reply = result["messages"][-1].content.lower()
-    assert "raquete airblast carbon pro" in final_reply
-    # Each variation closes with either "qualquer dúvida" or "qualquer coisa".
-    assert "qualquer dúvida" in final_reply or "qualquer coisa" in final_reply
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -259,29 +224,6 @@ async def test_out_of_scope_returns_canned_response():
 # ════════════════════════════════════════════════════════════════════════════
 # TRIAGE GATING
 # ════════════════════════════════════════════════════════════════════════════
-@pytest.mark.skip(reason="post-rec router branching removed in Sprint 2.6")
-
-@pytest.mark.asyncio
-async def test_triage_ignores_new_intents_before_recommendation():
-    """When recommended_products is empty, triage must NOT classify as a follow-up.
-
-    We mock the LLM to (badly) emit a follow-up intent anyway; the router
-    must demote it because state isn't post_recommendation.
-    """
-    from app.agent.graph import _triage_router
-
-    state = AgentState(
-        messages=[HumanMessage(content="quanto custa?")],
-        phone_hash="x" * 64,
-        intent="price_inquiry",  # LLM hypothetically emitted this
-        player_profile={},
-        recommended_products=[],
-        needs_handoff=False,
-        handoff_reason=None,
-        consultoria_interest=False,
-    )
-    # Router demotes to smalltalk because no recommendation has happened.
-    assert _triage_router(state) == "smalltalk"
 
 
 @pytest.mark.asyncio
@@ -301,23 +243,3 @@ async def test_triage_classifies_price_after_recommendation():
         last_recommendation_at=datetime.now(timezone.utc).isoformat(),
     )
     assert _triage_router(state) == "price_inquiry"
-@pytest.mark.skip(reason="post-rec router branching removed in Sprint 2.6")
-
-
-@pytest.mark.asyncio
-async def test_triage_classifies_selection_after_recommendation():
-    """product_selection routes to its node when post-rec."""
-    from app.agent.graph import _triage_router
-
-    state = AgentState(
-        messages=[HumanMessage(content="vou de carbon x5")],
-        phone_hash="x" * 64,
-        intent="product_selection",
-        player_profile={},
-        recommended_products=[_product("Carbon X5")],
-        needs_handoff=False,
-        handoff_reason=None,
-        consultoria_interest=False,
-        last_recommendation_at=datetime.now(timezone.utc).isoformat(),
-    )
-    assert _triage_router(state) == "product_selection"

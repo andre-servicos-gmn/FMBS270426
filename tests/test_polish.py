@@ -61,63 +61,6 @@ def test_recommend_does_not_stack_three_benefits():
     from app.agent.prompts import SYSTEM_RECOMMEND
     s = SYSTEM_RECOMMEND.lower()
     assert "nunca empilhar 3+ benefícios" in s or "nunca empilhar 3+" in s
-@pytest.mark.skip(reason="REFERENCE/PROFILE template rewrite obsolete in Sprint 2.6")
-
-
-@pytest.mark.asyncio
-async def test_recommend_pipeline_still_works_after_template_rewrite():
-    """Sanity integration test: a well-formed mocked LLM response still flows
-    through parse → guardrail → blocks even with the leaner template."""
-    from app.agent.nodes.recommend import recommend_node
-
-    fake_products = [
-        {
-            "id": "p1", "name": "Raquete X", "sport": "beach_tennis",
-            "level": "intermediário", "price_cents": 89900, "stock": 5,
-            "description": "carbono 3K", "similarity": 0.9, "external_id": "X1",
-            "url": None, "image_url": None, "updated_at": None, "is_active": True,
-            "weight_g": 350, "balance": "médio", "material": "carbono",
-            "category": "raquete",
-        }
-    ]
-    lean_response = json.dumps({"messages": [
-        "*Raquete X* — R$ 899\nCombina potência e controle.\nIdeal pra: _intermediário_",
-        "Posso reservar pra você?",
-    ]})
-
-    state = AgentState(
-        messages=[HumanMessage(content="me indica")],
-        phone_hash="polishtest" * 7,
-        intent="recommend",
-        player_profile={
-            "nivel_jogo": "intermediário",
-            "esporte_praticado": "beach tennis",
-            "lesoes": "nenhuma",
-            "regiao_lesao": "nenhuma",
-            "esporte_raquete_previo": "nao_aplicavel",
-            "modelo_desejado": "nenhum",
-        },
-        recommended_products=[],
-        needs_handoff=False,
-        handoff_reason=None,
-        consultoria_interest=False,
-    )
-
-    with patch("app.adapters.openai_client.OpenAIClient.chat", new_callable=AsyncMock) as llm:
-        llm.return_value = lean_response
-        with patch("app.rag.retriever.search_products", new_callable=AsyncMock) as search:
-            search.return_value = fake_products
-            with patch("app.storage.db.get_session", _mock_db_session):
-                result = await recommend_node(state)
-
-    blocks = result["response_blocks"]
-    # First block must carry the *bold* product name and "Ideal pra:" tail.
-    assert "*Raquete X*" in blocks[0]
-    assert "Ideal pra:" in blocks[0]
-    # Description should remain compact (≤2 visual lines / ≤120 chars between
-    # title and tail).
-    middle = blocks[0].split("\n", 1)[1].rsplit("Ideal pra:", 1)[0]
-    assert middle.count("\n") <= 2, f"description must fit in ≤2 lines, got:\n{middle!r}"
 
 
 # ════════════════════════════════════════════════════════════════════════════

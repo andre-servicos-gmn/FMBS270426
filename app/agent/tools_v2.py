@@ -133,12 +133,54 @@ def _score_product(q_tokens: list[str], product: dict[str, Any]) -> float:
 
 # ── tools ────────────────────────────────────────────────────────────────────
 
+# Top-N when filtering by a price range (more than the name-only top-5, but
+# still bounded so the LLM context doesn't blow up).
+_PRICE_RANGE_TOP_N = 8
+
+# Tokens that signal the customer is asking specifically for a racket, so a
+# price-range query without a distinctive name still restricts to rackets.
+_RACKET_HINT_TOKENS = {"raquete", "raquetes", "raqueta"}
+
+
+def _price_reais(product: dict[str, Any]) -> float | None:
+    cents = product.get("price_cents")
+    if cents is None:
+        return None
+    try:
+        return int(cents) / 100.0
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_racket(product: dict[str, Any]) -> bool:
+    if product.get("is_raquete_praia"):
+        return True
+    # Token-level match so "raqueteira" (bag) / "raqueteira" don't count as a
+    # racket — "raquete"/"raquetes" must appear as a whole word, and the
+    # category is the strongest signal.
+    cat_tokens = set(_tokens(str(product.get("categoria_nome") or "")))
+    name_tokens = set(_tokens(str(product.get("name") or "")))
+    racket_words = {"raquete", "raquetes"}
+    return bool((cat_tokens | name_tokens) & racket_words)
+
+
 @tool
-async def buscar_catalogo(consulta: str) -> str:
+async def buscar_catalogo(
+    consulta: str, preco_min: float | None = None, preco_max: float | None = None
+) -> str:
     """Busca produtos no catálogo da Base Sports por nome, marca ou características.
     Use sempre que o cliente mencionar um produto, pedir comparação, ou perguntar o que existe.
-    Para comparar dois produtos, chame uma vez para cada. Retorna lista com id, nome e preço."""
+    Para comparar dois produtos, chame uma vez para cada. Retorna lista com id, nome e preço.
+
+    Use preco_max e preco_min (em reais) para faixa de preço. Ex: "até 2k" →
+    preco_max=2000; "entre 1000 e 1500" → preco_min=1000, preco_max=1500; "as
+    mais baratas" → não passe faixa, mas a busca já ordena por preço quando há
+    filtro de preço. SEMPRE chame esta ferramenta com o filtro de preço antes de
+    dizer que não há produto numa faixa."""
     q_tokens = _content_tokens(consulta)
+    raw_tokens = set(_tokens(consulta))
+    wants_racket = bool(raw_tokens & _RACKET_HINT_TOKENS)
+    has_price_filter = preco_min is not None or preco_max is not None
 
     products: list[dict[str, Any]] = []
     # Primary: full in-memory snapshot (same path the legacy recommend uses).
@@ -160,7 +202,40 @@ async def buscar_catalogo(consulta: str) -> str:
     if not products:
         return json.dumps({"resultados": [], "aviso": "catalogo indisponivel"}, ensure_ascii=False)
 
-    if q_tokens:
+    # ── Price filter ─────────────────────────────────────────────────────────
+    if has_price_filter:
+        def _in_range(p: dict[str, Any]) -> bool:
+            price = _price_reais(p)
+            if price is None:
+                return False
+            if preco_min is not None and price < preco_min:
+                return False
+            if preco_max is not None and price > preco_max:
+                return False
+            return True
+
+        products = [p for p in products if _in_range(p)]
+        # Restrict to rackets when the query signals "raquete" (the name token
+        # "raquete" is a stopword for relevance, so it can't restrict on its own).
+        if wants_racket:
+            products = [p for p in products if _is_racket(p)]
+
+    # ── Ranking ──────────────────────────────────────────────────────────────
+    if has_price_filter:
+        # Price range → order by price ascending, return a bounded top-N.
+        # Apply name relevance as a secondary signal when there ARE distinctive
+        # name tokens (beyond the racket hint), else pure price order.
+        if q_tokens:
+            scored = [(p, _score_product(q_tokens, p)) for p in products]
+            # Keep all in-range products even with score 0 — the price filter
+            # already did the meaningful restriction. Sort by (score desc,
+            # price asc) so a name match floats up but cheap items still show.
+            scored.sort(key=lambda ps: (-ps[1], _price_reais(ps[0]) or float("inf")))
+            ranked = [p for p, _ in scored[:_PRICE_RANGE_TOP_N]]
+        else:
+            products.sort(key=lambda p: _price_reais(p) or float("inf"))
+            ranked = products[:_PRICE_RANGE_TOP_N]
+    elif q_tokens:
         scored = [(p, _score_product(q_tokens, p)) for p in products]
         scored = [(p, s) for p, s in scored if s > 0]
         scored.sort(key=lambda ps: ps[1], reverse=True)
@@ -172,7 +247,10 @@ async def buscar_catalogo(consulta: str) -> str:
         {"id": str(p.get("id")), "nome": p.get("name"), "preco": _price_brl(p.get("price_cents"))}
         for p in ranked
     ]
-    logger.info("buscar_catalogo q_tokens=%d results=%d", len(q_tokens), len(out))
+    logger.info(
+        "buscar_catalogo q_tokens=%d price_filter=%s racket=%s results=%d",
+        len(q_tokens), has_price_filter, wants_racket, len(out),
+    )
     return json.dumps(out, ensure_ascii=False)
 
 

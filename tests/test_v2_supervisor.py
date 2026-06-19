@@ -40,21 +40,38 @@ _FIXTURE_CATALOG = [
      "marca": "Dji", "modelo": "Mavic", "price_cents": 9801, "categoria_nome": "Acessorios"},
     {"id": 16376771838, "name": "Manguito Esquerdo Solar Drop Shot Proteção UV Beach Tennis",
      "marca": "Drop Shot", "modelo": "Manguito", "price_cents": 8900, "categoria_nome": "Manguitos"},
+    # Sub-2k rackets — the production bug: "raquete até 2k" must surface these.
+    {"id": 16700000001, "name": "Raquete Beach Tennis Mormaii Sunset Plus",
+     "marca": "Mormaii", "modelo": "Sunset Plus", "price_cents": 179990,
+     "categoria_nome": "Raquetes de Praia", "is_raquete_praia": True},
+    {"id": 16700000002, "name": "Raquete Beach Tennis Drop Shot Tiger 2.0 Iniciante",
+     "marca": "Drop Shot", "modelo": "Tiger 2.0", "price_cents": 46900,
+     "categoria_nome": "Raquetes de Praia", "is_raquete_praia": True},
+    # A cheap NON-racket near the same price, to prove racket-restriction works.
+    {"id": 16700000003, "name": "Bolsa Raqueteira Beach Tennis Generica",
+     "marca": "Generica", "modelo": "Bag", "price_cents": 120000,
+     "categoria_nome": "Bolsas"},
 ]
 
 
-async def _run_buscar(consulta: str) -> list[dict]:
+async def _run_buscar(consulta: str, preco_min=None, preco_max=None) -> list[dict]:
     """Call buscar_catalogo with the fixture catalog patched in."""
     from app.agent import tools_v2
 
     async def fake_snapshot():
         return list(_FIXTURE_CATALOG)
 
+    args: dict = {"consulta": consulta}
+    if preco_min is not None:
+        args["preco_min"] = preco_min
+    if preco_max is not None:
+        args["preco_max"] = preco_max
+
     with patch.object(tools_v2, "get_catalog_snapshot", fake_snapshot, create=True):
         # get_catalog_snapshot is imported lazily inside the tool; patch the
         # source module function instead.
         with patch("app.sync.bling_catalog_cache.get_catalog_snapshot", fake_snapshot):
-            raw = await tools_v2.buscar_catalogo.ainvoke({"consulta": consulta})
+            raw = await tools_v2.buscar_catalogo.ainvoke(args)
     data = json.loads(raw)
     return data if isinstance(data, list) else []
 
@@ -115,6 +132,64 @@ async def test_buscar_catalogo_noise_does_not_match_racket(query):
     results = await _run_buscar(query)
     racket_hits = [n for n in _names(results) if "raquete" in n.lower()]
     assert not racket_hits, f"{query!r} spuriously matched rackets: {racket_hits}"
+
+
+# ── 1b. Price-range filter ───────────────────────────────────────────────────
+
+def _price_to_float(preco_str: str) -> float:
+    """'R$ 1.799,90' → 1799.90."""
+    digits = preco_str.replace("R$", "").strip().replace(".", "").replace(",", ".")
+    return float(digits)
+
+
+@pytest.mark.asyncio
+async def test_buscar_catalogo_price_max_includes_sub2k_racket():
+    """The production bug: 'raquete até 2k' must surface the Mormaii Sunset
+    Plus (R$ 1.799,90), not conclude there's nothing under 2000."""
+    results = await _run_buscar("raquete", preco_max=2000)
+    assert results, "price_max=2000 returned nothing"
+    names = [n.lower() for n in _names(results)]
+    assert any("mormaii sunset" in n for n in names), f"missing Mormaii Sunset: {_names(results)}"
+    # Every result is within the price ceiling.
+    assert all(_price_to_float(r["preco"]) <= 2000 for r in results), \
+        f"a result exceeds 2000: {results}"
+    # And every result is a racket (racket-restriction applied). The bag
+    # ("Bolsa Raqueteira") must NOT leak — "raqueteira" contains "raquete" as a
+    # substring but is not a racket.
+    assert not any("bolsa" in n for n in names), \
+        f"a bag leaked into 'raquete até 2k': {_names(results)}"
+    assert all(("raquete" in r["nome"].lower().split())
+               or ("raquete de" in r["nome"].lower())
+               or r["nome"].lower().startswith("raquete")
+               for r in results), \
+        f"non-racket leaked into 'raquete até 2k': {_names(results)}"
+
+
+@pytest.mark.asyncio
+async def test_buscar_catalogo_price_range_only_in_band():
+    """'entre 1000 e 1500' returns only products inside the band."""
+    results = await _run_buscar("raquete", preco_min=1000, preco_max=1500)
+    for r in results:
+        price = _price_to_float(r["preco"])
+        assert 1000 <= price <= 1500, f"{r['nome']} at {price} is outside [1000,1500]"
+
+
+@pytest.mark.asyncio
+async def test_buscar_catalogo_price_filter_sorts_ascending():
+    """With a price filter, results come ordered cheapest-first."""
+    results = await _run_buscar("raquete", preco_max=3000)
+    prices = [_price_to_float(r["preco"]) for r in results]
+    assert prices == sorted(prices), f"not ascending: {prices}"
+
+
+@pytest.mark.asyncio
+async def test_buscar_catalogo_name_only_unchanged_no_regression():
+    """A pure name search (no price) behaves exactly as before."""
+    results = await _run_buscar("Kronos")
+    assert results
+    assert "kronos" in _names(results)[0].lower()
+    # No price params → name-relevance top-5 (the legacy shape).
+    assert len(results) <= 5
 
 
 # ════════════════════════════════════════════════════════════════════════════

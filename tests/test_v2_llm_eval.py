@@ -243,6 +243,55 @@ async def test_felipe_replay_behaviour(patched_data_layer):
                for r in reasons), f"T10 dossier reason not consultoria-flavored: {reasons}"
 
 
+# ── Price-filter E2E (production bug: "raquete até 2k" said "não encontrei") ──
+
+_PRICE_FIXTURE = [
+    {"id": 16623454022, "name": "Raquete Beach Tennis Ama Sport Kronos 2026",
+     "price_cents": 299990, "categoria_nome": "Raquetes de Praia", "is_raquete_praia": True,
+     "marca": "Ama", "modelo": "Kronos"},
+    {"id": 16700000001, "name": "Raquete Beach Tennis Mormaii Sunset Plus",
+     "price_cents": 179990, "categoria_nome": "Raquetes de Praia", "is_raquete_praia": True,
+     "marca": "Mormaii", "modelo": "Sunset Plus"},
+    {"id": 16700000002, "name": "Raquete Beach Tennis Drop Shot Tiger 2.0",
+     "price_cents": 46900, "categoria_nome": "Raquetes de Praia", "is_raquete_praia": True,
+     "marca": "Drop Shot", "modelo": "Tiger 2.0"},
+]
+
+
+@requires_key
+@pytest.mark.asyncio
+async def test_price_range_query_surfaces_sub2k_racket():
+    """The production bug: 'raquete até 2 mil' must list the sub-2k racket, not
+    claim there's nothing. The LLM must call buscar_catalogo with preco_max."""
+    from langgraph.checkpoint.memory import MemorySaver
+
+    from app.agent.supervisor import build_supervisor_graph
+
+    async def _snap():
+        return list(_PRICE_FIXTURE)
+
+    with patch("app.sync.bling_catalog_cache.get_catalog_snapshot", _snap):
+        graph = build_supervisor_graph(MemorySaver())
+        cfg = {"configurable": {"thread_id": "eval-price"}}
+        result = await graph.ainvoke(
+            {"messages": [HumanMessage(content="quero uma raquete até 2 mil reais, o que tem?")],
+             "phone_hash": "h", "thread_id": "eval-price"}, config=cfg)
+
+    # The LLM called buscar_catalogo with a price ceiling.
+    price_calls = [
+        tc for m in result["messages"] if isinstance(m, AIMessage)
+        for tc in (getattr(m, "tool_calls", None) or [])
+        if tc["name"] == "buscar_catalogo" and tc["args"].get("preco_max") is not None
+    ]
+    assert price_calls, "LLM did not call buscar_catalogo with preco_max"
+    # Final answer surfaces the sub-2k racket and does NOT claim emptiness.
+    final = _final_text(result).lower()
+    assert "mormaii" in final or "tiger" in final, f"sub-2k racket not surfaced: {final[:300]}"
+    assert not ("não encontrei" in final or "nao encontrei" in final or
+                "não temos" in final or "nao temos" in final), \
+        f"falsely claimed nothing in range: {final[:300]}"
+
+
 # ── Classifier — both directions ─────────────────────────────────────────────
 
 _CLASSIFIER_CASES = [

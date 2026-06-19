@@ -112,10 +112,11 @@ def _tool_names_this_turn(result, n_before: int) -> list[str]:
 
 
 # Store identity is set EXPLICITLY in the test (the prod default is empty for
-# safety) so T9 can assert against a known canonical address.
+# safety) so T9 can assert against known canonical values.
 _STORE_NAME = "Base Sports"
 _STORE_ADDRESS = "Av. Beira Mar, 1234, Florianópolis"
 _STORE_HOURS = "seg a sáb, 9h às 19h"
+_ECOMMERCE_URL = "https://loja.basesports.com.br"
 
 
 @pytest.fixture
@@ -124,6 +125,7 @@ def patched_data_layer(monkeypatch):
     monkeypatch.setenv("STORE_NAME", _STORE_NAME)
     monkeypatch.setenv("STORE_ADDRESS", _STORE_ADDRESS)
     monkeypatch.setenv("STORE_HOURS", _STORE_HOURS)
+    monkeypatch.setenv("ECOMMERCE_URL", _ECOMMERCE_URL)
     get_settings.cache_clear()
     # handoff_dossier_pipeline is patched as an AsyncMock SPY so the scheduling
     # turn's escalar_humano fires the (mocked) dossier without notifying anyone.
@@ -221,16 +223,22 @@ async def test_felipe_replay_behaviour(patched_data_layer):
     assert "consultoria" in t8 or "avaliar" in t8 or "quadra" in t8 or "não posso" in t8 or "nao posso" in t8, \
         f"T8 should hold the line: {t8[:300]}"
 
-    # ── Purchase turn (T9) — direct to the physical store using the CANONICAL
-    #    address set explicitly for this test (NOT a hallucinated one), no
-    #    online checkout, no human escalation. ─────────────────────────────
-    addr_token = "beira mar"  # distinctive substring of _STORE_ADDRESS
-    assert addr_token in t_buy, (
-        f"T9 must give the CANONICAL store address ({addr_token!r}), not invent one: {t_buy[:300]}"
-    )
-    online_words = ["checkout", "link de pagamento", "link para pagamento", "site",
-                    "carrinho", "finalizar compra", "pagar online", "comprar online"]
-    assert not any(w in t_buy for w in online_words), f"T9 invented online purchase: {t_buy[:300]}"
+    # ── Purchase turn (T9) — must offer BOTH channels: online e-commerce (the
+    #    canonical URL + PIX) AND the physical store (the canonical address).
+    #    No invented link, no human escalation. ────────────────────────────
+    # Physical channel: the canonical address (not a hallucinated one).
+    assert "beira mar" in t_buy, f"T9 missing physical store address: {t_buy[:300]}"
+    # Online channel: the canonical e-commerce signalled (url host OR pix).
+    assert ("basesports" in t_buy or "loja.basesports" in t_buy or "pix" in t_buy
+            or "e-commerce" in t_buy or "ecommerce" in t_buy or "online" in t_buy), \
+        f"T9 missing online channel: {t_buy[:300]}"
+    # Must NOT claim physical-only.
+    assert not ("apenas na loja" in t_buy or "só na loja" in t_buy or "somente na loja" in t_buy
+                or "não vende online" in t_buy or "nao vende online" in t_buy), \
+        f"T9 falsely claimed physical-only: {t_buy[:300]}"
+    # Must NOT invent a DIFFERENT link than the canonical one.
+    invented_link = re.search(r"https?://(?!loja\.basesports)", t_buy)
+    assert not invented_link, f"T9 invented a link: {t_buy[:300]}"
     assert "escalar_humano" not in tools_buy, f"T9 should NOT escalate: tools={tools_buy}"
 
     # ── Scheduling turn (T10) — must escalate to a human; dossier fires with a
@@ -290,6 +298,90 @@ async def test_price_range_query_surfaces_sub2k_racket():
     assert not ("não encontrei" in final or "nao encontrei" in final or
                 "não temos" in final or "nao temos" in final), \
         f"falsely claimed nothing in range: {final[:300]}"
+
+
+# ── Comparison pulls the named products fresh (not a stale earlier one) ──────
+
+_COMPARE_FIXTURE = [
+    {"id": 1, "name": "Raquete Beach Tennis AMA PROTEO 2026 Azul", "price_cents": 289990,
+     "categoria_nome": "Raquetes de Praia", "is_raquete_praia": True, "marca": "Ama", "modelo": "Proteo"},
+    {"id": 2, "name": "Raquete Beach Tennis Ama Sport Kronos 2026", "price_cents": 299990,
+     "categoria_nome": "Raquetes de Praia", "is_raquete_praia": True, "marca": "Ama", "modelo": "Kronos"},
+    {"id": 3, "name": "Raquete Beach Tennis AMA Sport Athena 2026 Pink", "price_cents": 259990,
+     "categoria_nome": "Raquetes de Praia", "is_raquete_praia": True, "marca": "Ama", "modelo": "Athena"},
+]
+
+
+@requires_key
+@pytest.mark.asyncio
+async def test_comparison_pulls_named_products_not_stale():
+    """Bug: 'diferença da Proteo e Kronos' compared Proteo with Athena because
+    Athena was in an earlier turn. The agent must fetch BOTH named products
+    fresh; the answer compares Proteo and Kronos, not Athena."""
+    from langgraph.checkpoint.memory import MemorySaver
+
+    from app.agent.supervisor import build_supervisor_graph
+
+    by_id = {p["id"]: p for p in _COMPARE_FIXTURE}
+
+    async def _snap():
+        return list(_COMPARE_FIXTURE)
+
+    async def _byid(pid):
+        return by_id.get(int(pid))
+
+    with patch("app.sync.bling_catalog_cache.get_catalog_snapshot", _snap), \
+         patch("app.sync.bling_repo.fetch_product_by_id", _byid):
+        graph = build_supervisor_graph(MemorySaver())
+        cfg = {"configurable": {"thread_id": "eval-compare"}}
+        # Turn 1: put Athena into the conversation history.
+        await graph.ainvoke(
+            {"messages": [HumanMessage(content="me fala da Athena")],
+             "phone_hash": "h", "thread_id": "eval-compare"}, config=cfg)
+        # Turn 2: ask to compare Proteo and Kronos.
+        result = await graph.ainvoke(
+            {"messages": [HumanMessage(content="qual a diferença entre a proteo e a kronos?")],
+             "phone_hash": "h", "thread_id": "eval-compare"}, config=cfg)
+
+    final = _final_text(result).lower()
+    assert "proteo" in final, f"comparison dropped Proteo: {final[:300]}"
+    assert "kronos" in final, f"comparison dropped Kronos: {final[:300]}"
+    assert "athena" not in final, f"comparison wrongly pulled stale Athena: {final[:300]}"
+
+
+# ── Tone: no fixed closing-line spam ─────────────────────────────────────────
+
+@requires_key
+@pytest.mark.asyncio
+async def test_tone_no_fixed_closing_line(patched_data_layer):
+    """The agent must not end every message with the same canned closing
+    ('Se precisar de mais informações ou ajuda, é só avisar!'). Across a few
+    turns, that exact line must not appear in the majority of replies."""
+    from langgraph.checkpoint.memory import MemorySaver
+
+    from app.agent.supervisor import build_supervisor_graph
+
+    graph = build_supervisor_graph(MemorySaver())
+    cfg = {"configurable": {"thread_id": "eval-tone"}}
+    msgs = [
+        "oi",
+        "qual o preço da kronos?",
+        "e da proteo?",
+        "qual a diferença entre elas?",
+    ]
+    finals = []
+    for m in msgs:
+        result = await graph.ainvoke(
+            {"messages": [HumanMessage(content=m)],
+             "phone_hash": "evalfelipehash", "thread_id": "eval-tone"}, config=cfg)
+        finals.append(_final_text(result).lower())
+
+    canned = "se precisar de mais informações ou ajuda, é só avisar"
+    canned_count = sum(1 for f in finals if canned in f)
+    # The exact canned line must not dominate (allow at most 1 of 4).
+    assert canned_count <= 1, (
+        f"canned closing line appeared in {canned_count}/{len(finals)} replies: {finals}"
+    )
 
 
 # ── Classifier — both directions ─────────────────────────────────────────────

@@ -76,7 +76,17 @@ SYSTEM_SUPERVISOR_TEMPLATE = (
     "busca não achar, diga que não achou e ofereça ajuda para localizar. "
     "Ao se referir a um produto, use SEMPRE o nome canônico que veio do "
     "buscar_catalogo, mesmo que o cliente tenha escrito com erro de digitação — "
-    "não repita a grafia errada do cliente. "
+    "não repita a grafia errada do cliente.\n"
+    "AO COMPARAR DOIS PRODUTOS: busque CADA UM pelo nome citado pelo cliente "
+    "naquele momento (uma chamada de buscar_catalogo por produto). NUNCA "
+    "reaproveite um produto de um turno anterior — se o cliente diz \"diferença "
+    "entre a Proteo e a Kronos\", busque Proteo E busque Kronos agora, não pegue "
+    "um produto que já estava na conversa.\n"
+    "RESULTADO FRACO: se a busca não retornar nada, ou retornar só produtos que "
+    "claramente não são o que o cliente pediu (nome bem diferente), NÃO "
+    "apresente um produto irrelevante como se fosse a resposta. Diga que não "
+    "encontrou aquele produto e ofereça buscar de outro jeito ou pedir mais "
+    "detalhes.\n"
     "Quando o cliente perguntar por faixa de preço (ex: \"até 2 mil\", \"entre "
     "1000 e 1500\", \"as mais baratas\"), chame buscar_catalogo com preco_min/"
     "preco_max. NUNCA afirme que não há produto numa faixa de preço sem ter "
@@ -95,16 +105,16 @@ SYSTEM_SUPERVISOR_TEMPLATE = (
     "personalizada, não pode.\n\n"
     "A CONSULTORIA\n"
     "Avaliação presencial em que analisamos o jogo do cliente em quadra e "
-    "indicamos a raquete certa pro perfil dele. Valor R$ 350. Você NÃO tem os "
-    "detalhes de quem conduz, como agendar ou duração. Para esses, acione o "
-    "atendimento humano (escalar_humano), nunca invente.\n\n"
+    "indicamos a raquete certa pro perfil dele. Valor R$ 350, 100% abatido na "
+    "compra de uma raquete. Você NÃO tem os detalhes de quem conduz, como "
+    "agendar ou duração. Para esses, acione o atendimento humano "
+    "(escalar_humano), nunca invente.\n\n"
     "COMO COMPRAR\n"
-    "A {store_name} vende na loja física, não online. Quando o cliente quiser "
-    "comprar um produto, direcione ele pra loja: confirme o produto, se for "
-    "útil cheque o estoque, e oriente sobre o endereço e o horário. Não "
-    "invente checkout, link de pagamento ou compra online, e não acione "
-    "atendente só por causa de compra, é só direcionar pra loja.\n"
-    "{store_block}\n\n"
+    "A {store_name} vende em DOIS canais: online pelo e-commerce (com PIX) e na "
+    "loja física. Quando o cliente quiser comprar, ofereça as duas opções: "
+    "confirme o produto, se for útil cheque o estoque, e apresente os dois "
+    "caminhos. Não acione atendente só por causa de compra, é só orientar.\n"
+    "{purchase_block}\n\n"
     "QUANDO ACIONAR ATENDENTE (escalar_humano)\n"
     "Quando o cliente pedir explicitamente falar com uma pessoa, quando a dúvida "
     "for genuinamente fora do escopo de produtos e da loja, ou para encaminhar o "
@@ -114,50 +124,74 @@ SYSTEM_SUPERVISOR_TEMPLATE = (
     "ESTILO (WhatsApp)\n"
     "Mensagens curtas e diretas. Sem markdown, sem asteriscos de negrito, sem "
     "tabelas. Nunca mostre códigos ou ids internos de produto; refira-se aos "
-    "produtos pelo nome."
+    "produtos pelo nome.\n"
+    "TOM HUMANO: NÃO use uma frase de fechamento fixa. NÃO termine quase toda "
+    "mensagem com algo como \"Se precisar de mais informações ou ajuda, é só "
+    "avisar!\" — isso soa robô. Na maioria das vezes, encerre naturalmente "
+    "depois de responder. Ofereça mais ajuda só quando fizer sentido de verdade, "
+    "e quando oferecer, varie as palavras. Soe como uma pessoa, não como um "
+    "script.\n"
+    "AO LISTAR produtos ou specs, formate de forma limpa e legível pro WhatsApp "
+    "(uma linha por item), e não grude uma frase de fechamento na mesma linha do "
+    "último produto."
 )
 
 
 def build_system_prompt(settings=None) -> str:
-    """Render the system prompt with the store identity injected from Settings.
+    """Render the system prompt with the store/e-commerce identity from Settings.
 
-    When ``store_address`` is configured, the canonical address (and hours, if
-    set) are pinned in the prompt so the model never has to — and never may —
-    invent an address for a customer being sent to the physical store.
+    The purchase block describes BOTH channels (online e-commerce with PIX, and
+    the physical store). Two safety rules, same shape as before:
 
-    When ``store_address`` is EMPTY (unconfigured .env), NO address is injected:
-    the block instead tells the agent to ask the customer to confirm the
-    address. This is the safety rule — an unconfigured deploy must never make
-    the live agent assert a false address.
-
-    ``buscar_conhecimento`` still handles other institutional questions
-    (policies, exchange) — only the core store identity is pinned here.
+    - store address: pinned from settings when configured; when EMPTY, no
+      address is stated — the agent asks the customer to confirm it.
+    - e-commerce url: pinned when configured; when EMPTY, the e-commerce is
+      still mentioned but WITHOUT a (broken/invented) link — the agent asks the
+      customer to confirm the link. An unconfigured deploy never asserts a false
+      address or a false URL.
     """
     if settings is None:
         settings = get_settings()
 
     address = (settings.store_address or "").strip()
     hours = (settings.store_hours or "").strip()
+    ecommerce = (settings.ecommerce_url or "").strip()
 
+    # ── Online channel ───────────────────────────────────────────────────────
+    if ecommerce:
+        online = (
+            f"ONLINE: o e-commerce da loja é {ecommerce}. Lá dá pra comprar com "
+            "PIX e ganhar 5% de desconto no PIX."
+        )
+    else:
+        online = (
+            "ONLINE: a loja TEM e-commerce com pagamento via PIX (5% de desconto "
+            "no PIX), mas você NÃO tem o link cadastrado. NUNCA invente uma URL. "
+            "Mencione que dá pra comprar online e peça pro cliente confirmar o "
+            "link do e-commerce com a gente."
+        )
+
+    # ── Physical channel ─────────────────────────────────────────────────────
     if address:
         loc = f"a loja fica em {address}"
         if hours:
             loc += f", horário de atendimento {hours}"
-        store_block = (
-            "DADOS FIXOS DA LOJA (use SEMPRE estes, nunca invente outro "
-            f"endereço ou horário): {loc}."
+        physical = (
+            f"LOJA FÍSICA (use SEMPRE estes dados, nunca invente outro endereço "
+            f"ou horário): {loc}."
         )
     else:
-        # No configured address → do NOT state one. Ask the customer to confirm.
-        store_block = (
-            "ENDEREÇO DA LOJA: você NÃO tem o endereço cadastrado. NUNCA invente "
-            "um endereço ou horário. Direcione o cliente pra loja física e peça "
-            "pra ele confirmar o endereço e o horário com a gente."
+        physical = (
+            "LOJA FÍSICA: você NÃO tem o endereço cadastrado. NUNCA invente um "
+            "endereço ou horário. Mencione que tem loja física e peça pro cliente "
+            "confirmar o endereço e o horário com a gente."
         )
+
+    purchase_block = online + "\n" + physical
 
     return SYSTEM_SUPERVISOR_TEMPLATE.format(
         store_name=settings.store_name or "Base Sports",
-        store_block=store_block,
+        purchase_block=purchase_block,
     )
 
 # OpenAI function schemas derived once from the @tool objects.
@@ -401,6 +435,9 @@ _INTERNAL_ID_RE = re.compile(r"(?<!\d)\d{9,}(?!\d)")  # Bling ids are >=9 digits
 # An explicit "ID: 12345" / "(id 12345)" label leaking into customer text.
 _ID_LABEL_RE = re.compile(r"(?i)\(?\bid[:\s]*\d{5,}\)?")
 _BOLD_RE = re.compile(r"\*{1,3}([^*]+)\*{1,3}")
+# Markdown link [text](url) → plain url. WhatsApp doesn't render markdown links,
+# so the customer would otherwise see the raw "[text](url)" noise.
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
 # A line that is just a raw JSON object/array (tool output that leaked).
 _JSON_LINE_RE = re.compile(r"^\s*[\[{].*[\]}]\s*$")
 # An inline raw JSON object/array blob that leaked mid-sentence. Matches a
@@ -413,6 +450,7 @@ _JSON_INLINE_RE = re.compile(r"[\[{][^\[\]{}]*\"[^\[\]{}]*[\]}]")
 def _sanitize_for_whatsapp(text: str) -> str:
     """Deterministic cleanup of the final answer before it leaves the graph.
 
+    - converts markdown links [text](url) → plain url (WhatsApp shows raw md)
     - strips markdown bold (** / *** → plain text)
     - removes leaked internal ids / UUIDs and "ID: …" labels
     - drops lines that are raw JSON/array dumps (tool output that leaked)
@@ -424,8 +462,11 @@ def _sanitize_for_whatsapp(text: str) -> str:
     if not text:
         return text
 
-    # 1) markdown bold → plain
-    out = _BOLD_RE.sub(r"\1", text)
+    # 1) markdown link [text](url) → plain url (WhatsApp shows raw markdown).
+    out = _MD_LINK_RE.sub(r"\2", text)
+
+    # 1b) markdown bold → plain
+    out = _BOLD_RE.sub(r"\1", out)
 
     # 2a) inline raw JSON/array blobs (leaked tool output) → drop, then
     #     2b) whole-line JSON dumps are handled in step 4.

@@ -112,6 +112,12 @@ class Settings(BaseSettings):
     store_maps_url: str = Field(default="")
     store_phone: str = Field(default="")
 
+    # E-commerce online da Base Sports (venda online com PIX). Default VAZIO
+    # pela mesma regra de segurança do endereço: sem link, o agente menciona o
+    # e-commerce mas NÃO inventa URL — pede pro cliente confirmar o link. O
+    # André preenche o link real no .env antes do deploy.
+    ecommerce_url: str = Field(default="")
+
     # Consultoria Base Esportes — produto pago de consultoria com teste em
     # quadra que o agente NÃO pode substituir. consultoria_enabled=False
     # remove a menção do recommend e desativa o node de pitch.

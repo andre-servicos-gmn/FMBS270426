@@ -33,6 +33,10 @@ _PARAGRAPH_FORCE_SENTENCE_SPLIT = 300
 
 _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?…])\s+(?=[A-Z0-9ÀÁÂÃÉÊÍÓÔÕÚÇ])")
 _PARAGRAPH_BOUNDARY = re.compile(r"\n\s*\n+")
+# A fragment that is ONLY a list-item marker ("4.", "10)", "-", "•") with no
+# content — the sentence splitter must never leave this orphaned at a block
+# end; it gets glued back to the following fragment (the actual item).
+_ORPHAN_LIST_MARKER = re.compile(r"^\s*(?:\d{1,2}[.)]|[-•*])\s*$")
 
 
 def parse_messages(llm_output) -> list[str]:
@@ -131,9 +135,25 @@ def _split_by_sentence(text: str) -> list[str]:
     breaks into 2 blocks instead of collapsing into one. Hard cap is
     ``_MAX_BLOCK_CHARS``.
     """
-    sentences = [s.strip() for s in _SENTENCE_BOUNDARY.split(text) if s.strip()]
-    if not sentences:
+    raw_sentences = [s.strip() for s in _SENTENCE_BOUNDARY.split(text) if s.strip()]
+    if not raw_sentences:
         return [text[:_MAX_BLOCK_CHARS]]
+
+    # Glue orphaned list markers ("4.", "10)", "-") back onto the next fragment
+    # so a sentence split never separates a number from its item.
+    sentences: list[str] = []
+    pending_marker = ""
+    for s in raw_sentences:
+        if _ORPHAN_LIST_MARKER.match(s):
+            pending_marker = (pending_marker + " " + s).strip() if pending_marker else s
+            continue
+        if pending_marker:
+            sentences.append(f"{pending_marker} {s}".strip())
+            pending_marker = ""
+        else:
+            sentences.append(s)
+    if pending_marker:  # trailing orphan with nothing after — keep it.
+        sentences.append(pending_marker)
 
     blocks: list[str] = []
     current = ""

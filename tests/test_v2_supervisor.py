@@ -51,6 +51,14 @@ _FIXTURE_CATALOG = [
     {"id": 16700000003, "name": "Bolsa Raqueteira Beach Tennis Generica",
      "marca": "Generica", "modelo": "Bag", "price_cents": 120000,
      "categoria_nome": "Bolsas"},
+    # Products with tokens that 'baran' transposes into ("branco"/"branca") —
+    # the production false-match. Must NOT be returned for "Baran".
+    {"id": 16700000004, "name": "Boné Drop Shot Trucker Cor Branco",
+     "marca": "Drop Shot", "modelo": "Trucker", "price_cents": 12900,
+     "categoria_nome": "Bonés"},
+    {"id": 16700000005, "name": "Raquete Beach Tennis Heroes Sofia Chow Branca 2024",
+     "marca": "Heroes", "modelo": "Sofia Chow", "price_cents": 159990,
+     "categoria_nome": "Raquetes de Praia", "is_raquete_praia": True},
 ]
 
 
@@ -132,6 +140,20 @@ async def test_buscar_catalogo_noise_does_not_match_racket(query):
     results = await _run_buscar(query)
     racket_hits = [n for n in _names(results) if "raquete" in n.lower()]
     assert not racket_hits, f"{query!r} spuriously matched rackets: {racket_hits}"
+
+
+@pytest.mark.asyncio
+async def test_buscar_catalogo_baran_returns_empty_not_irrelevant():
+    """Production bug: 'Baran' (not in catalog) falsely matched 'Branca/Branco'
+    via letter transposition and dumped Heroes Sofia Chow as 'the only one'.
+    With threshold 0.82, no token clears the bar → empty, not an irrelevant
+    product."""
+    results = await _run_buscar("Baran")
+    names = [n.lower() for n in _names(results)]
+    assert not any("branco" in n or "branca" in n or "sofia chow" in n for n in names), \
+        f"'Baran' dumped an irrelevant transposition match: {_names(results)}"
+    # Ideally empty; certainly must not surface the false 'branca' racket.
+    assert results == [], f"'Baran' should return empty, got: {_names(results)}"
 
 
 # ── 1b. Price-range filter ───────────────────────────────────────────────────
@@ -252,22 +274,22 @@ def test_system_prompt_empty_address_injects_no_address(monkeypatch):
     monkeypatch.setenv("STORE_NAME", "")
     monkeypatch.setenv("STORE_ADDRESS", "")
     monkeypatch.setenv("STORE_HOURS", "")
+    monkeypatch.setenv("ECOMMERCE_URL", "")
     from app.config import get_settings
     get_settings.cache_clear()
 
     from app.agent.supervisor import build_system_prompt
     prompt = build_system_prompt()
-    assert "DADOS FIXOS DA LOJA" not in prompt
     assert "Beira Mar" not in prompt
     # The empty-address branch must instruct asking the customer to confirm.
     assert "confirmar o endereço" in prompt.lower() or "confirme o endereço" in prompt.lower()
-    assert "NÃO tem o endereço" in prompt or "não tem o endereço" in prompt.lower()
+    assert "não tem o endereço" in prompt.lower()
     get_settings.cache_clear()
 
 
 def test_system_prompt_configured_address_is_pinned(monkeypatch):
     """With store_address set, the canonical address+hours are pinned in the
-    DADOS FIXOS block."""
+    physical-store block (use SEMPRE estes dados)."""
     monkeypatch.setenv("STORE_NAME", "Base Sports")
     monkeypatch.setenv("STORE_ADDRESS", "Rua Tal, 99, Cidade")
     monkeypatch.setenv("STORE_HOURS", "seg a sex, 8h-18h")
@@ -276,9 +298,48 @@ def test_system_prompt_configured_address_is_pinned(monkeypatch):
 
     from app.agent.supervisor import build_system_prompt
     prompt = build_system_prompt()
-    assert "DADOS FIXOS DA LOJA" in prompt
+    assert "LOJA FÍSICA" in prompt
     assert "Rua Tal, 99, Cidade" in prompt
     assert "seg a sex, 8h-18h" in prompt
+    get_settings.cache_clear()
+
+
+def test_system_prompt_ecommerce_url_pinned_when_set(monkeypatch):
+    """With ecommerce_url set, the canonical link is pinned (PIX + discount)."""
+    monkeypatch.setenv("ECOMMERCE_URL", "https://loja.basesports.com.br")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    from app.agent.supervisor import build_system_prompt
+    prompt = build_system_prompt()
+    assert "https://loja.basesports.com.br" in prompt
+    assert "pix" in prompt.lower()
+    get_settings.cache_clear()
+
+
+def test_system_prompt_empty_ecommerce_url_no_invented_link(monkeypatch):
+    """Safety rule: with ecommerce_url EMPTY, the e-commerce is mentioned but no
+    URL is invented — the agent asks the customer to confirm the link."""
+    monkeypatch.setenv("ECOMMERCE_URL", "")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    from app.agent.supervisor import build_system_prompt
+    prompt = build_system_prompt()
+    assert "http" not in prompt.lower()  # no link of any kind
+    assert "e-commerce" in prompt.lower()
+    assert "confirmar o link" in prompt.lower() or "confirme o link" in prompt.lower()
+    get_settings.cache_clear()
+
+
+def test_system_prompt_no_online_only_claim(monkeypatch):
+    """The prompt must NOT claim sale is 'only in the physical store'."""
+    from app.config import get_settings
+    get_settings.cache_clear()
+    from app.agent.supervisor import build_system_prompt
+    prompt = build_system_prompt().lower()
+    assert "não online" not in prompt and "nao online" not in prompt
+    assert "apenas na loja" not in prompt and "só na loja" not in prompt
     get_settings.cache_clear()
 
 
@@ -333,6 +394,17 @@ def test_sanitize_strips_bold_and_ids():
     assert "**" not in out
     assert "16623454022" not in out
     assert "Kronos" in out
+
+
+def test_sanitize_converts_markdown_link_to_url():
+    """WhatsApp doesn't render [text](url) — convert to the plain url."""
+    from app.agent.supervisor import _sanitize_for_whatsapp
+    out = _sanitize_for_whatsapp(
+        "Acesse [loja.basesports.com.br](https://loja.basesports.com.br) e pague com PIX"
+    )
+    assert "](" not in out
+    assert "https://loja.basesports.com.br" in out
+    assert "PIX" in out
 
 
 def test_sanitize_removes_uuid():

@@ -32,13 +32,17 @@ from langgraph.prebuilt import InjectedState
 
 logger = logging.getLogger(__name__)
 
-# Phonetic-fuzzy match threshold. Calibrated against the dev catalog (Fase 1
-# diagnosis): "cronus"->"Kronos" scores 0.83 and "protheu"->"Proteo" scores
-# 1.00 after phonetic folding, while unrelated names stay <=0.67. 0.75 cleanly
-# separates the real product from noise. NO rapidfuzz (not installed) and NO
-# pg_trgm (trigram scored "cronus"/"kronos" at 0.077 — useless for c/k swaps);
-# stdlib difflib over phonetically-folded tokens does the job.
-_FUZZY_THRESHOLD = 0.75
+# Phonetic-fuzzy match threshold. Calibrated against the real catalog:
+#   - real typos:  "cronus"->"kronos" = 0.83, "protheu"->"proteo" = 1.00
+#   - noise:       "baran"->"branco"/"branca"/"bassan" = 0.80 (transposition —
+#                  difflib's ratio is generous with scrambled letters)
+# 0.82 separates the real typos (>=0.83) from transposition noise (<=0.80),
+# which fixes the production "Baran -> Heroes Sofia Chow (branca)" false match.
+# NO rapidfuzz (not installed) and NO pg_trgm (trigram scored cronus/kronos at
+# 0.077 — useless for c/k swaps); stdlib difflib over phonetically-folded
+# tokens does the job. When no token clears the bar, buscar_catalogo returns an
+# empty list instead of dumping an irrelevant product.
+_FUZZY_THRESHOLD = 0.82
 
 
 # ── helpers (simple search, NO _product_match decision machinery) ────────────

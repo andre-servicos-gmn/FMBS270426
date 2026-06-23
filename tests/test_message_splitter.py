@@ -29,6 +29,47 @@ def test_parse_messages_accepts_dict_directly():
     assert blocks == ["a", "b"]
 
 
+# ── numbered product list must never break mid-item (production regression) ──
+
+def test_numbered_product_list_never_splits_mid_item():
+    """Production bug: a numbered raquete list broke into balloons mid-item
+    ('...459,00\\n3.' | 'Raquete...'). A list must only break BETWEEN whole
+    items — every block line is a complete item (or the intro)."""
+    import re
+    txt = (
+        "Aqui estão algumas raquetes de Beach Tennis até R$ 2000:\n"
+        "1. Raquete de Beach Tennis Drop Shot Pentax 3.0 Fibra Iniciante - R$ 449,00\n"
+        "2. Raquete de Beach Tennis Drop Shot Stage Pro 1.0 BT Iniciante - R$ 459,00\n"
+        "3. Raquete De Beach Tennis Drop Shot Nilo Red Iniciante - R$ 469,00\n"
+        "4. Raquete de Beach Tennis DROP SHOT KEY Coco RED Iniciante - R$ 469,00\n"
+        "5. Raquete De Beach Tennis Drop Shot Key Coco Blue Original - R$ 469,00\n"
+        "6. Raquete de Beach Tennis Drop Shot Tiger 2.0 Iniciante - R$ 469,00"
+    )
+    blocks = parse_messages(txt)
+    # No block may START with a bare item number missing its text, and no block
+    # may END with a dangling marker like "3." — i.e. every numbered line that
+    # appears must carry the product name + price on the same line.
+    orphan = re.compile(r"(?m)^\s*\d{1,2}\.\s*$")
+    for b in blocks:
+        assert not orphan.search(b), f"orphan list marker in block: {b!r}"
+        # Every numbered line in the block has a price on the same line.
+        for line in b.splitlines():
+            m = re.match(r"^\s*\d{1,2}\.\s", line)
+            if m:
+                assert "R$" in line, f"item line split from its price: {line!r}"
+
+
+def test_short_list_stays_single_block():
+    """A 2-3 item short list under the threshold stays in one balloon."""
+    txt = (
+        "Tem opção a partir de R$ 449:\n"
+        "- Drop Shot Pentax 3.0 - R$ 449,00\n"
+        "- Drop Shot Stage Pro - R$ 459,00"
+    )
+    blocks = parse_messages(txt)
+    assert len(blocks) == 1
+
+
 def test_parse_messages_accepts_plain_list():
     blocks = parse_messages(["um", "dois"])
     assert blocks == ["um", "dois"]

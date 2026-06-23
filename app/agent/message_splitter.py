@@ -31,12 +31,22 @@ _SHORT_TOTAL_THRESHOLD = 200
 # sentence split for any paragraph beyond this length.
 _PARAGRAPH_FORCE_SENTENCE_SPLIT = 300
 
-_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?…])\s+(?=[A-Z0-9ÀÁÂÃÉÊÍÓÔÕÚÇ])")
+# Sentence boundary: split after .!?… + whitespace before an uppercase/number
+# start — BUT never right after a list-item marker ("3." / "10)") at the start
+# of a line. The negative lookbehind on a short digit-run+dot stops the splitter
+# from treating an item number as a sentence end (the production bug: a numbered
+# product list broke into balloons mid-item, e.g. "...459,00\n3." | "Raquete…").
+_SENTENCE_BOUNDARY = re.compile(
+    r"(?<![\d])(?<=[.!?…])\s+(?=[A-Z0-9ÀÁÂÃÉÊÍÓÔÕÚÇ])"
+)
 _PARAGRAPH_BOUNDARY = re.compile(r"\n\s*\n+")
 # A fragment that is ONLY a list-item marker ("4.", "10)", "-", "•") with no
 # content — the sentence splitter must never leave this orphaned at a block
 # end; it gets glued back to the following fragment (the actual item).
 _ORPHAN_LIST_MARKER = re.compile(r"^\s*(?:\d{1,2}[.)]|[-•*])\s*$")
+# A line that begins with a list-item marker — used to detect "this response is
+# a list" so we pack whole items into blocks instead of sentence-splitting them.
+_LIST_LINE = re.compile(r"^\s*(?:\d{1,2}[.)]|[-–—•*])\s+\S")
 
 
 def parse_messages(llm_output) -> list[str]:
@@ -105,10 +115,44 @@ def _clean_blocks(items) -> list[str]:
     return out
 
 
+def _looks_like_list(text: str) -> bool:
+    """True when the response is mostly list lines (2+ items) — a product list.
+    Such responses must be packed by whole items, never sentence-split."""
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    list_lines = [ln for ln in lines if _LIST_LINE.match(ln)]
+    return len(list_lines) >= 2
+
+
+def _split_list(text: str) -> list[str]:
+    """Pack a list response into blocks WITHOUT ever cutting a line in half.
+
+    A leading intro line (before the first item) stays glued to the first item.
+    Items are packed greedily up to the target size; a block boundary only ever
+    falls BETWEEN whole lines.
+    """
+    lines = [ln.rstrip() for ln in text.splitlines() if ln.strip()]
+    blocks: list[str] = []
+    current = ""
+    for ln in lines:
+        candidate = f"{current}\n{ln}" if current else ln
+        if current and len(candidate) > _TARGET_BLOCK_CHARS:
+            blocks.append(current)
+            current = ln
+        else:
+            current = candidate
+    if current:
+        blocks.append(current)
+    return _cap_block_count(blocks)
+
+
 def _fallback_split(text: str) -> list[str]:
     """Split a single plain-text response into 1–4 blocks heuristically."""
     if len(text) <= _SHORT_TOTAL_THRESHOLD:
         return [text]
+
+    # A numbered/bulleted product list: pack whole items, never cut mid-item.
+    if _looks_like_list(text):
+        return _split_list(text)
 
     # First try paragraph boundaries (\n\n or more)
     paragraphs = [p.strip() for p in _PARAGRAPH_BOUNDARY.split(text) if p.strip()]

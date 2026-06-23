@@ -295,6 +295,24 @@ async def test_buscar_catalogo_price_only_no_category_no_name_defaults_beach_ten
 
 
 @pytest.mark.asyncio
+async def test_buscar_catalogo_bare_racket_browse_no_price_no_category():
+    """PRODUCTION REGRESSION (results=0): the LLM called buscar_catalogo with
+    consulta='raquetes de beach tennis' and NO preco/categoria. All tokens are
+    stopwords, so the name score was 0 → results=0 → agent said 'não temos'. A
+    bare racket browse must now list beach tennis rackets, cheapest-first."""
+    for consulta in ("raquetes de beach tennis", "raquetes", "raquete"):
+        results = await _run_buscar(consulta)
+        assert results, f"bare racket browse returned nothing for {consulta!r}"
+        names = [n.lower() for n in _names(results)]
+        assert not any(
+            w in n for n in names
+            for w in ("tenis wilson", "pickleball", "bolsa", "raqueteira", "frescobol")
+        ), f"junk leaked into bare racket browse {consulta!r}: {_names(results)}"
+        prices = [_price_to_float(r["preco"]) for r in results]
+        assert prices == sorted(prices), f"not price-ascending for {consulta!r}: {prices}"
+
+
+@pytest.mark.asyncio
 async def test_buscar_catalogo_named_product_with_price_still_findable():
     """The default-to-beach-tennis must NOT block a specific named search: a
     customer asking for a named product within a budget still finds it (name
@@ -642,9 +660,11 @@ def test_should_not_force_when_model_answered_with_tool_call():
     assert _should_force_search(state, ai) is False
 
 
-def test_should_not_force_when_already_searched_this_turn():
-    """If buscar_catalogo already ran this turn and came back empty, an honest
-    'não temos' is allowed — don't loop."""
+def test_should_force_when_search_returned_empty_on_price_question():
+    """A search that came back EMPTY on a price question does NOT count as
+    grounded — the model may have searched with bad args (the production case:
+    no preco/categoria → results=0). Force a clean retry instead of trusting
+    'não temos'."""
     from app.agent.supervisor import _should_force_search
     state = {"messages": [
         HumanMessage(content="tem raquetes até 1k?"),
@@ -652,6 +672,22 @@ def test_should_not_force_when_already_searched_this_turn():
         ToolMessage(content="[]", tool_call_id="c1", name="buscar_catalogo"),
     ]}
     ai = AIMessage(content="Não encontrei raquetes nessa faixa.", tool_calls=[])
+    assert _should_force_search(state, ai) is True
+
+
+def test_should_not_force_when_search_returned_items():
+    """If buscar_catalogo already ran this turn and FOUND products, a follow-up
+    answer is grounded — don't loop."""
+    from app.agent.supervisor import _should_force_search
+    state = {"messages": [
+        HumanMessage(content="tem raquetes até 1k?"),
+        AIMessage(content="", tool_calls=[{"name": "buscar_catalogo", "args": {}, "id": "c1"}]),
+        ToolMessage(
+            content='[{"id":"1","nome":"Raquete Drop Shot","preco":"R$ 449,00"}]',
+            tool_call_id="c1", name="buscar_catalogo",
+        ),
+    ]}
+    ai = AIMessage(content="Temos a Drop Shot a R$ 449.", tool_calls=[])
     assert _should_force_search(state, ai) is False
 
 

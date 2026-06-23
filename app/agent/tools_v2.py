@@ -278,10 +278,18 @@ async def buscar_catalogo(
     has_price_filter = preco_min is not None or preco_max is not None
     has_category = bool(categoria and categoria.strip())
     sort_by_price = (ordenacao or "").strip().lower() == "preco_asc"
-    # Price ordering kicks in for a price filter, an explicit preco_asc, OR a
-    # category-only browse (a "show me beach tennis rackets" list reads best
-    # cheapest-first). Name-only searches keep relevance ordering.
-    price_ordered = has_price_filter or sort_by_price or has_category
+    # Distinctive name tokens = the customer named a specific product (beyond the
+    # generic "raquete"/"beach"/"tennis" hint words, which are stopwords).
+    distinctive = [t for t in q_tokens if t not in _RACKET_HINT_TOKENS]
+    # A "raquete" query with NO distinctive name and NO price/sort is a BROWSE
+    # of beach tennis rackets, not a name match. Production bug: gpt-4o-mini
+    # called buscar_catalogo(consulta="raquetes de beach tennis") with no
+    # preco/categoria; the name score was 0 (all stopwords) → results=0 → the
+    # agent said "não temos". Treat it as a beach tennis browse instead.
+    racket_browse = wants_racket and not distinctive and not has_category
+    # Price ordering kicks in for a price filter, an explicit preco_asc, a
+    # category browse, OR a bare racket browse (reads best cheapest-first).
+    price_ordered = has_price_filter or sort_by_price or has_category or racket_browse
 
     products: list[dict[str, Any]] = []
     # Primary: full in-memory snapshot (same path the legacy recommend uses).
@@ -313,14 +321,11 @@ async def buscar_catalogo(
     # leak into "raquete até 1k"). The default is enforced here, in code.
     if has_category:
         products = [p for p in products if _matches_category(p, categoria)]
-    elif has_price_filter or sort_by_price:
-        # Price/sort intent with no explicit category. If the customer named a
-        # specific product (distinctive name tokens beyond the racket hint),
-        # keep the broad set so name relevance can find it; otherwise pin to
-        # beach tennis rackets so junk never leaks.
-        distinctive = [t for t in q_tokens if t not in _RACKET_HINT_TOKENS]
-        if not distinctive:
-            products = [p for p in products if _is_beach_tennis_racket(p)]
+    elif (has_price_filter or sort_by_price or racket_browse) and not distinctive:
+        # Price/sort/racket-browse intent with no explicit category and no
+        # distinctive name → pin to beach tennis rackets so the result is the
+        # real catalog, never junk and never an empty name-match.
+        products = [p for p in products if _is_beach_tennis_racket(p)]
 
     # ── Price filter ─────────────────────────────────────────────────────────
     if has_price_filter:
@@ -342,11 +347,13 @@ async def buscar_catalogo(
 
     # ── Ranking ──────────────────────────────────────────────────────────────
     if price_ordered:
-        # Price/category browse → order by price ascending, bounded top-N.
+        # Price/category/racket browse → order by price ascending, bounded top-N.
         # When there ARE distinctive name tokens, a name match floats up first
         # (score desc) and price breaks ties; otherwise it's pure price order —
-        # so "as mais baratas de beach tennis" works WITHOUT a name to match.
-        if q_tokens:
+        # so "as mais baratas de beach tennis" / a bare "raquetes" browse work
+        # WITHOUT a name to match (stopword-only tokens score 0, so we skip the
+        # scoring and sort purely by price).
+        if distinctive:
             scored = [(p, _score_product(q_tokens, p)) for p in products]
             scored.sort(key=lambda ps: (-ps[1], _price_reais(ps[0]) or float("inf")))
             ranked = [p for p, _ in scored[:_PRICE_RANGE_TOP_N]]

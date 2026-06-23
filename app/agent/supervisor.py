@@ -469,18 +469,40 @@ def _last_human_text(messages: list[BaseMessage]) -> str:
 
 
 def _searched_in_recent_tail(messages: list[BaseMessage]) -> bool:
-    """True if buscar_catalogo ran since the last human message — so a claim of
-    unavailability would at least be grounded in a real (possibly empty) search.
+    """True if a buscar_catalogo with a NON-EMPTY result ran since the last
+    human message — so a claim of unavailability is grounded in a real search
+    that actually found something (an empty/zero-result search does NOT count;
+    the model may have searched with bad args, and we'd rather force a clean
+    retry than trust a "não tem" built on results=0).
 
-    Walk backward from the end: a buscar_catalogo ToolMessage seen BEFORE the
-    current turn's human message means the model already searched this turn.
+    Walk backward from the end to the current turn's human message.
     """
     for m in reversed(messages):
         role = getattr(m, "type", None)
         if role == "human":
-            return False  # reached the current question without seeing a search
+            return False  # reached the current question without a real search
         if role == "tool" and getattr(m, "name", "") == "buscar_catalogo":
-            return True
+            content = m.content if isinstance(m.content, str) else str(m.content)
+            if _tool_result_has_items(content):
+                return True
+    return False
+
+
+def _tool_result_has_items(content: str) -> bool:
+    """True when a buscar_catalogo tool result carries at least one product.
+
+    The tool returns a JSON list of products on success, or {"resultados": [],
+    ...} / [] when empty. Parse defensively; on any doubt treat as empty so the
+    guard errs toward forcing a real search.
+    """
+    try:
+        data = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if isinstance(data, list):
+        return len(data) > 0
+    if isinstance(data, dict):
+        return bool(data.get("resultados"))
     return False
 
 

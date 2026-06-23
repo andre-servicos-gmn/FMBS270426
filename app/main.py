@@ -1,4 +1,5 @@
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -15,10 +16,19 @@ configure_logging(settings)
 
 logger = logging.getLogger(__name__)
 
+# Build marker so logs unambiguously show WHICH build is live. Set GIT_SHA in
+# the deploy env (EasyPanel / Docker build arg); falls back to "unknown".
+# Grep one line at startup — "app_build sha=..." — to confirm a redeploy
+# actually replaced the container (the recurring "is the new code live?" pain).
+BUILD_SHA = os.getenv("GIT_SHA", "unknown")
+
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
-    logger.info("Application starting up (env=%s)", settings.app_env)
+    logger.info(
+        "Application starting up (env=%s) app_build sha=%s use_v2=%s",
+        settings.app_env, BUILD_SHA, settings.use_v2,
+    )
 
     try:
         from app.storage.db import init_db

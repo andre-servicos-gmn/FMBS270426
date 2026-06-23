@@ -60,6 +60,13 @@ RUN pip install --upgrade pip \
 # .dockerignore — they don't belong in a production image.
 COPY scripts ./scripts
 
+# ── Build marker ────────────────────────────────────────────────────────
+# Stamp the git commit into the image so the running container logs WHICH
+# build is live ("app_build sha=..." at startup). Pass --build-arg GIT_SHA=...
+# from the deploy (EasyPanel can inject it). Defaults to "unknown" when unset.
+ARG GIT_SHA=unknown
+ENV GIT_SHA=${GIT_SHA}
+
 # ── Non-root user ───────────────────────────────────────────────────────
 # uid 10001 avoids any clash with host uids on a multi-tenant VPS.
 RUN useradd --create-home --shell /usr/sbin/nologin --uid 10001 appuser \

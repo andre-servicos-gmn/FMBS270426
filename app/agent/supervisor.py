@@ -410,6 +410,115 @@ def _to_openai_messages(messages: list[BaseMessage]) -> list[dict]:
     return out
 
 
+# ── Anti-hallucination: never claim "we don't have it" without searching ─────
+#
+# Production reality (gpt-4o-mini): the model sometimes answers a catalog/price
+# question by ASSERTING the product doesn't exist, with tool_calls=0 — it never
+# called buscar_catalogo, it guessed. The soft prompt rule ("NUNCA afirme que
+# não há produto sem ter chamado buscar_catalogo") is ignored often enough to
+# matter. So we enforce it deterministically: if the model's FINAL answer (no
+# tool calls this turn) claims unavailability AND nothing was searched earlier
+# in the conversation-tail, we reject that answer and re-run the turn FORCING a
+# buscar_catalogo call (tool_choice). The forced call yields tool_calls, so the
+# graph routes through ToolNode → supervisor as usual; the next turn answers
+# from real data.
+
+# Phrases that signal the model is asserting "we don't have it / not found".
+_UNAVAILABILITY_RE = re.compile(
+    r"(?i)\b("
+    r"n[ãa]o\s+(encontr|temos|h[áa]|tem\b|possu|dispon|localiz)"
+    r"|nenhum[ao]?\s+(produto|raquete|op[çc][ãa]o|item)"
+    r"|fora\s+do\s+(nosso\s+)?cat[áa]logo"
+    r"|sem\s+op[çc][õo]es"
+    r"|n[ãa]o\s+temos\s+(no\s+momento|op[çc])"
+    r")",
+)
+
+# Customer-message signals that the turn is about the catalog/products/price —
+# the cases where an unsupported "we don't have it" is dangerous.
+_CATALOG_INTENT_RE = re.compile(
+    r"(?i)\b("
+    r"raquete|raqueta|pala|bola|mochila|raqueteira|grip|"
+    r"pre[çc]o|custa|quanto|reais|r\$|mil\b|"
+    r"at[ée]\b|abaixo|acima|barat|caro|faixa|"
+    r"tem\b|t[êe]m\b|voc[êe]s?\s+tem|catalogo|cat[áa]logo|modelo"
+    r")",
+)
+
+
+def _last_human_text(messages: list[BaseMessage]) -> str:
+    for m in reversed(messages):
+        if getattr(m, "type", None) == "human":
+            return m.content if isinstance(m.content, str) else str(m.content)
+    return ""
+
+
+def _searched_in_recent_tail(messages: list[BaseMessage]) -> bool:
+    """True if buscar_catalogo ran since the last human message — so a claim of
+    unavailability would at least be grounded in a real (possibly empty) search.
+
+    Walk backward from the end: a buscar_catalogo ToolMessage seen BEFORE the
+    current turn's human message means the model already searched this turn.
+    """
+    for m in reversed(messages):
+        role = getattr(m, "type", None)
+        if role == "human":
+            return False  # reached the current question without seeing a search
+        if role == "tool" and getattr(m, "name", "") == "buscar_catalogo":
+            return True
+    return False
+
+
+def _build_openai_request(state: AgentStateV2, settings, *, force_search: bool) -> dict:
+    api_messages = _to_openai_messages(
+        [SystemMessage(content=build_system_prompt(settings))] + list(state["messages"])
+    )
+    req: dict = {
+        "model": settings.openai_model,
+        "messages": api_messages,
+        "tools": _OPENAI_TOOLS,
+        "temperature": 0.3,
+        "max_tokens": 1024,
+    }
+    if force_search:
+        # Force a buscar_catalogo call — the model is not allowed to answer a
+        # catalog question from memory this time.
+        req["tool_choice"] = {
+            "type": "function",
+            "function": {"name": "buscar_catalogo"},
+        }
+    return req
+
+
+def _adapt_choice(choice) -> AIMessage:
+    tool_calls = []
+    for tc in (choice.tool_calls or []):
+        try:
+            parsed_args = json.loads(tc.function.arguments or "{}")
+        except (json.JSONDecodeError, TypeError):
+            parsed_args = {}
+        tool_calls.append({"name": tc.function.name, "args": parsed_args, "id": tc.id})
+    return AIMessage(content=choice.content or "", tool_calls=tool_calls)
+
+
+def _should_force_search(state: AgentStateV2, ai: AIMessage) -> bool:
+    """The model produced a FINAL answer (no tool calls) that claims a product
+    is unavailable, the question was about the catalog, and nothing was searched
+    this turn → the claim is ungrounded; force a search instead of trusting it.
+    """
+    if ai.tool_calls:
+        return False
+    content = ai.content if isinstance(ai.content, str) else str(ai.content)
+    if not _UNAVAILABILITY_RE.search(content):
+        return False
+    messages = state.get("messages") or []
+    if not _CATALOG_INTENT_RE.search(_last_human_text(messages)):
+        return False
+    if _searched_in_recent_tail(messages):
+        return False  # already searched; an empty result is a legit "não tem"
+    return True
+
+
 async def supervisor_node(state: AgentStateV2) -> dict:
     """Single LLM turn: feed the system prompt + history, let the model either
     answer or request tool calls. Returns the new AIMessage for the reducer.
@@ -418,35 +527,34 @@ async def supervisor_node(state: AgentStateV2) -> dict:
     the legacy OpenAIClient). The model's response is returned as-is — there is
     no unmask step (the legacy masker is irreversible and the model never saw
     raw PII).
+
+    Anti-hallucination guard: gpt-4o-mini sometimes answers a catalog/price
+    question by asserting the product doesn't exist WITHOUT calling
+    buscar_catalogo. When the final answer claims unavailability for a catalog
+    question and nothing was searched this turn, we reject it and re-run the
+    turn FORCING a buscar_catalogo call (tool_choice). One retry only.
     """
     settings = get_settings()
     client = AsyncOpenAI(api_key=settings.openai_api_key)
 
-    api_messages = _to_openai_messages(
-        [SystemMessage(content=build_system_prompt(settings))] + list(state["messages"])
-    )
-
     response = await client.chat.completions.create(
-        model=settings.openai_model,
-        messages=api_messages,
-        tools=_OPENAI_TOOLS,
-        temperature=0.3,
-        max_tokens=1024,
+        **_build_openai_request(state, settings, force_search=False)
     )
-    choice = response.choices[0].message
+    ai = _adapt_choice(response.choices[0].message)
 
-    # Adapt the OpenAI response into a LangChain AIMessage. ToolNode and
-    # tools_condition key off AIMessage.tool_calls (list of {name,args,id}).
-    tool_calls = []
-    for tc in (choice.tool_calls or []):
+    forced = False
+    if _should_force_search(state, ai):
+        logger.info("supervisor_v2 forcing buscar_catalogo (ungrounded unavailability claim)")
         try:
-            parsed_args = json.loads(tc.function.arguments or "{}")
-        except (json.JSONDecodeError, TypeError):
-            parsed_args = {}
-        tool_calls.append({"name": tc.function.name, "args": parsed_args, "id": tc.id})
+            retry = await client.chat.completions.create(
+                **_build_openai_request(state, settings, force_search=True)
+            )
+            ai = _adapt_choice(retry.choices[0].message)
+            forced = True
+        except Exception as exc:  # noqa: BLE001 — fall back to the original answer
+            logger.warning("supervisor_v2 force_search_failed: %s", exc)
 
-    ai = AIMessage(content=choice.content or "", tool_calls=tool_calls)
-    logger.info("supervisor_v2 turn tool_calls=%d", len(tool_calls))
+    logger.info("supervisor_v2 turn tool_calls=%d forced=%s", len(ai.tool_calls), forced)
     return {"messages": [ai]}
 
 
@@ -470,6 +578,27 @@ _JSON_LINE_RE = re.compile(r"^\s*[\[{].*[\]}]\s*$")
 # brackets). Collapsed to nothing — the model's prose around it carries the
 # real answer.
 _JSON_INLINE_RE = re.compile(r"[\[{][^\[\]{}]*\"[^\[\]{}]*[\]}]")
+
+# Banned canned closing line (Felipe's complaint). gpt-4o-mini keeps appending a
+# generic "if you need anything, just let me know" no matter how hard the prompt
+# forbids it. The prompt is the soft guard; this regex is the deterministic
+# backstop. We only strip it when it's a TRAILING standalone offer — a whole
+# final sentence/line that is just a generic "ask me anything" — never prose in
+# the middle of a real answer. Anchored to the END of the text.
+_CANNED_CLOSING_RE = re.compile(
+    r"(?ims)"
+    r"(?:\n|^|(?<=[.!?]))\s*"          # start of the trailing sentence/line
+    r"(?:"
+    r"se\s+(?:voc[êe]\s+)?precisar[^.\n!?]*"          # "se precisar (de ...) ..."
+    r"|qualquer\s+(?:d[úu]vida|coisa)[^.\n!?]*"        # "qualquer dúvida ..."
+    r"|se\s+(?:tiver|surgir)[^.\n!?]*(?:d[úu]vida|pergunta|quest)[^.\n!?]*"
+    r"|estou\s+(?:[àa]\s+disposi[çc][ãa]o|aqui\s+(?:para|pra)\s+ajudar)[^.\n!?]*"
+    r"|fico\s+(?:[àa]\s+disposi[çc][ãa]o|por\s+aqui)[^.\n!?]*"
+    r"|conte\s+comigo[^.\n!?]*"
+    r")"
+    r"(?:[.!]*)"                        # trailing punctuation/emoji
+    r"\s*$",                            # to the very end
+)
 
 
 def _sanitize_for_whatsapp(text: str) -> str:
@@ -507,6 +636,15 @@ def _sanitize_for_whatsapp(text: str) -> str:
     # 4) drop lines that are pure JSON/array dumps
     kept_lines = [ln for ln in out.splitlines() if not _JSON_LINE_RE.match(ln)]
     out = "\n".join(kept_lines)
+
+    # 4b) strip a TRAILING canned closing offer ("se precisar… é só avisar",
+    #     "estou à disposição", …). Only at the end, run twice in case the model
+    #     stacked two of them (it sent the closing as a separate block in prod).
+    for _ in range(2):
+        stripped = _CANNED_CLOSING_RE.sub("", out).rstrip()
+        if stripped == out:
+            break
+        out = stripped
 
     # 5) tidy: collapse 3+ newlines to 2, trim trailing spaces per line
     out = "\n".join(ln.rstrip() for ln in out.splitlines())

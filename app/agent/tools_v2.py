@@ -304,13 +304,23 @@ async def buscar_catalogo(
         return json.dumps({"resultados": [], "aviso": "catalogo indisponivel"}, ensure_ascii=False)
 
     # ── Category filter ───────────────────────────────────────────────────────
-    # Explicit categoria param wins. Otherwise, a price/sort query that mentions
-    # "raquete" still restricts to (beach-tennis) rackets so the customer asking
-    # "raquete até 1000" never gets a bag or anti-vibrator.
+    # Explicit categoria param wins. Otherwise, a price/sort query defaults to
+    # BEACH TENNIS rackets — this is a beach tennis/padel store, so a bare
+    # "raquete até 1000" (or even a price query with no name at all) means a
+    # beach tennis racket, never a tennis/pickleball racket, a bag, or an
+    # anti-vibrator. We do NOT trust the LLM to pass categoria (in production it
+    # often omits it, and gpt-4o-mini then let a "Raquete Tenis Tecnifibre"
+    # leak into "raquete até 1k"). The default is enforced here, in code.
     if has_category:
         products = [p for p in products if _matches_category(p, categoria)]
-    elif (has_price_filter or sort_by_price) and wants_racket:
-        products = [p for p in products if _is_racket(p)]
+    elif has_price_filter or sort_by_price:
+        # Price/sort intent with no explicit category. If the customer named a
+        # specific product (distinctive name tokens beyond the racket hint),
+        # keep the broad set so name relevance can find it; otherwise pin to
+        # beach tennis rackets so junk never leaks.
+        distinctive = [t for t in q_tokens if t not in _RACKET_HINT_TOKENS]
+        if not distinctive:
+            products = [p for p in products if _is_beach_tennis_racket(p)]
 
     # ── Price filter ─────────────────────────────────────────────────────────
     if has_price_filter:

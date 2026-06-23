@@ -31,9 +31,12 @@ THREAD_ID = "replay-preco-categoria-1"
 PHONE_HASH = "preco_categoria_test_hash"
 
 TURNS = [
-    "vocês tem raquetes de beach tennis abaixo de mil reais?",
+    # The EXACT production turns that failed (agent answered "não tem" with
+    # tool_calls=0, hallucinating unavailability).
+    "tem raquetes até 1k?",
+    "e até 2 mil reais?",
+    # Original price/category turns.
     "quero as mais baratas",
-    "tem até 1500?",
     "compara a mormaii sunset e a macaw",
 ]
 

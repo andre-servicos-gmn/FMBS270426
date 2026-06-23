@@ -278,6 +278,33 @@ async def test_buscar_catalogo_frescobol_kit_excluded_from_beach_tennis():
 
 
 @pytest.mark.asyncio
+async def test_buscar_catalogo_price_only_no_category_no_name_defaults_beach_tennis():
+    """PRODUCTION REGRESSION: the LLM called buscar_catalogo(preco_max=1000)
+    with NO categoria and NO consulta, and a tennis racket ('Raquete Tenis
+    Tecnifibre') leaked. A bare price query in a beach-tennis store must default
+    to beach tennis rackets — no tennis/pickleball/bag, even when the LLM omits
+    categoria."""
+    results = await _run_buscar("", preco_max=1000)
+    names = [n.lower() for n in _names(results)]
+    assert results, "price-only query returned nothing"
+    assert not any(
+        w in n for n in names
+        for w in ("tenis wilson", "pickleball", "bolsa", "raqueteira", "frescobol")
+    ), f"junk leaked into price-only query: {_names(results)}"
+    assert all(_price_to_float(r["preco"]) <= 1000 for r in results)
+
+
+@pytest.mark.asyncio
+async def test_buscar_catalogo_named_product_with_price_still_findable():
+    """The default-to-beach-tennis must NOT block a specific named search: a
+    customer asking for a named product within a budget still finds it (name
+    relevance kept when distinctive tokens are present)."""
+    results = await _run_buscar("Kronos", preco_max=5000)
+    assert any("kronos" in n.lower() for n in _names(results)), \
+        f"named product lost under price filter: {_names(results)}"
+
+
+@pytest.mark.asyncio
 async def test_buscar_catalogo_category_plus_price_combined():
     """'raquete de beach tennis até 1500' = categoria + preco_max, every result
     a beach tennis racket within the band, cheapest-first, no junk."""
@@ -499,6 +526,37 @@ def test_sanitize_preserves_prices_and_years():
     assert "2026" in out
 
 
+def test_sanitize_strips_canned_closing_line():
+    """Felipe's complaint: gpt-4o-mini keeps appending the fixed closing offer
+    no matter what the prompt says. The sanitizer must strip it deterministically
+    — but only the TRAILING generic offer, never the product info above it."""
+    from app.agent.supervisor import _sanitize_for_whatsapp
+    cases = [
+        "A Mormaii Sunset sai por R$ 1.799,90.\nSe precisar de mais informações ou ajuda, é só avisar!",
+        "Temos a Drop Shot Pentax a R$ 449. Se precisar de ajuda com outras faixas de preço ou produtos, é só avisar!",
+        "Encontrei 3 opções. Qualquer dúvida, estou à disposição!",
+        "A Kronos é ótima pra controle. Fico à disposição.",
+    ]
+    for raw in cases:
+        out = _sanitize_for_whatsapp(raw)
+        assert "é só avisar" not in out.lower()
+        assert "à disposição" not in out.lower() and "a disposicao" not in out.lower()
+        assert "qualquer dúvida" not in out.lower()
+        # The real content above the closing survives.
+        assert any(tok in out for tok in ("R$", "Kronos", "opções", "Drop Shot"))
+
+
+def test_sanitize_keeps_contextual_question_offer():
+    """A specific, contextual next-step question is NOT a canned closing and must
+    survive — we only strip the generic 'ask me anything' boilerplate."""
+    from app.agent.supervisor import _sanitize_for_whatsapp
+    out = _sanitize_for_whatsapp(
+        "A Mormaii é a mais em conta das duas. Quer que eu veja o estoque dela?"
+    )
+    assert "estoque" in out.lower()
+    assert "Quer que eu" in out
+
+
 def test_sanitize_node_rewrites_by_id_no_duplicate():
     from langgraph.graph.message import add_messages
 
@@ -515,6 +573,139 @@ def test_sanitize_node_rewrites_by_id_no_duplicate():
     assert len(ai_msgs) == 1
     assert "**" not in ai_msgs[0].content
     assert "16623454022" not in ai_msgs[0].content
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 3b. Anti-hallucination: forced search when the model claims "we don't have it"
+#     without calling buscar_catalogo (the production tool_calls=0 bug).
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def _fake_openai_message(content="", tool_calls=None):
+    """Build a stub object shaped like an OpenAI chat completion message."""
+    from types import SimpleNamespace
+    tcs = []
+    for tc in (tool_calls or []):
+        tcs.append(SimpleNamespace(
+            id=tc.get("id", "call_1"),
+            function=SimpleNamespace(
+                name=tc["name"],
+                arguments=json.dumps(tc.get("args", {})),
+            ),
+        ))
+    return SimpleNamespace(content=content, tool_calls=tcs or None)
+
+
+def _fake_completion(message):
+    from types import SimpleNamespace
+    return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+
+def test_should_force_search_detects_ungrounded_unavailability():
+    from app.agent.supervisor import _should_force_search
+    state = {"messages": [HumanMessage(content="tem raquetes até 1k?")]}
+    ai = AIMessage(content="Não encontrei raquetes de Beach Tennis abaixo de R$ 1000.", tool_calls=[])
+    assert _should_force_search(state, ai) is True
+
+
+def test_should_not_force_when_model_answered_with_tool_call():
+    from app.agent.supervisor import _should_force_search
+    state = {"messages": [HumanMessage(content="tem raquetes até 1k?")]}
+    ai = AIMessage(content="", tool_calls=[{"name": "buscar_catalogo", "args": {}, "id": "c1"}])
+    assert _should_force_search(state, ai) is False
+
+
+def test_should_not_force_when_already_searched_this_turn():
+    """If buscar_catalogo already ran this turn and came back empty, an honest
+    'não temos' is allowed — don't loop."""
+    from app.agent.supervisor import _should_force_search
+    state = {"messages": [
+        HumanMessage(content="tem raquetes até 1k?"),
+        AIMessage(content="", tool_calls=[{"name": "buscar_catalogo", "args": {}, "id": "c1"}]),
+        ToolMessage(content="[]", tool_call_id="c1", name="buscar_catalogo"),
+    ]}
+    ai = AIMessage(content="Não encontrei raquetes nessa faixa.", tool_calls=[])
+    assert _should_force_search(state, ai) is False
+
+
+def test_should_not_force_on_nonprice_smalltalk():
+    from app.agent.supervisor import _should_force_search
+    state = {"messages": [HumanMessage(content="oi, tudo bem?")]}
+    ai = AIMessage(content="Tudo ótimo! Como posso ajudar?", tool_calls=[])
+    assert _should_force_search(state, ai) is False
+
+
+@pytest.mark.asyncio
+async def test_supervisor_node_forces_buscar_catalogo_on_hallucinated_unavailability(monkeypatch):
+    """End-to-end of the guard: model first answers 'não encontrei' with NO
+    tool call (the prod bug); supervisor_node rejects it and re-runs FORCING
+    buscar_catalogo, so the returned message carries a tool call."""
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    from app.agent import supervisor as sup
+
+    calls = {"n": 0, "forced_request": None}
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # First pass: ungrounded unavailability, no tool call.
+                return _fake_completion(_fake_openai_message(
+                    content="Não encontrei raquetes de Beach Tennis abaixo de R$ 1000."
+                ))
+            # Second pass must be the forced one.
+            calls["forced_request"] = kwargs.get("tool_choice")
+            return _fake_completion(_fake_openai_message(
+                tool_calls=[{"name": "buscar_catalogo", "args": {"preco_max": 1000}, "id": "c1"}]
+            ))
+
+    class _FakeClient:
+        def __init__(self, *a, **k):
+            self.chat = type("C", (), {"completions": _FakeCompletions()})()
+
+    monkeypatch.setattr(sup, "AsyncOpenAI", _FakeClient)
+
+    state = {"messages": [HumanMessage(content="tem raquetes até 1k?")],
+             "phone_hash": "h", "thread_id": "t"}
+    out = await sup.supervisor_node(state)
+
+    assert calls["n"] == 2, "supervisor did not retry after ungrounded claim"
+    assert calls["forced_request"] == {
+        "type": "function", "function": {"name": "buscar_catalogo"},
+    }, "retry did not force buscar_catalogo via tool_choice"
+    msg = out["messages"][0]
+    assert msg.tool_calls and msg.tool_calls[0]["name"] == "buscar_catalogo"
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_supervisor_node_no_retry_when_answer_is_grounded(monkeypatch):
+    """A normal answer (no unavailability claim) must NOT trigger a second call."""
+    from app.config import get_settings
+    get_settings.cache_clear()
+    from app.agent import supervisor as sup
+
+    calls = {"n": 0}
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            calls["n"] += 1
+            return _fake_completion(_fake_openai_message(
+                content="A Drop Shot Pentax sai por R$ 449."
+            ))
+
+    class _FakeClient:
+        def __init__(self, *a, **k):
+            self.chat = type("C", (), {"completions": _FakeCompletions()})()
+
+    monkeypatch.setattr(sup, "AsyncOpenAI", _FakeClient)
+    state = {"messages": [HumanMessage(content="quanto custa a pentax?")],
+             "phone_hash": "h", "thread_id": "t"}
+    out = await sup.supervisor_node(state)
+    assert calls["n"] == 1, "should not retry a grounded answer"
+    get_settings.cache_clear()
 
 
 # ════════════════════════════════════════════════════════════════════════════

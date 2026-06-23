@@ -445,6 +445,21 @@ _CATALOG_INTENT_RE = re.compile(
     r")",
 )
 
+# STRONG catalog intent: a price/budget/availability question. When the customer
+# asks one of these and the model answers WITHOUT searching, we force the search
+# regardless of how the (non-)answer is phrased — we no longer depend on
+# recognizing a "não temos" phrase, because gpt-4o-mini phrases it many ways
+# ("Parece que não temos opções nessa faixa", "fora do nosso catálogo", a bare
+# "não", etc.). A price question that gets answered from memory is, by itself,
+# the bug.
+_PRICE_INTENT_RE = re.compile(
+    r"(?i)("
+    r"\bat[ée]\b|\babaixo\b|\bacima\b|\bmenos\s+de\b|\bmais\s+de\b|"
+    r"\bbarat|\bmais\s+em\s+conta\b|\bfaixa\s+de\s+pre[çc]o\b|"
+    r"\bpre[çc]o\b|\bquanto\s+custa\b|\br\$|\breais\b|\bmil\b|\bk\b"
+    r")",
+)
+
 
 def _last_human_text(messages: list[BaseMessage]) -> str:
     for m in reversed(messages):
@@ -502,21 +517,48 @@ def _adapt_choice(choice) -> AIMessage:
 
 
 def _should_force_search(state: AgentStateV2, ai: AIMessage) -> bool:
-    """The model produced a FINAL answer (no tool calls) that claims a product
-    is unavailable, the question was about the catalog, and nothing was searched
-    this turn → the claim is ungrounded; force a search instead of trusting it.
+    """Decide whether to reject the model's final answer and force a
+    buscar_catalogo call. The model answered from memory when it should have
+    searched.
+
+    Two triggers, both require: the model produced a FINAL answer (no tool
+    calls) AND nothing was searched this turn.
+
+    1. PRICE/BUDGET question (strong): the customer asked "até 1k", "abaixo de
+       mil", "quanto custa", a price range, etc. A price question answered
+       WITHOUT searching is the bug itself — we force the search regardless of
+       how the answer is phrased. This is the production case ("tem raquetes
+       até 1k?" → "não encontrei", tool_calls=0) and does NOT depend on
+       recognizing the unavailability wording (gpt-4o-mini phrases it many
+       ways).
+
+    2. UNAVAILABILITY claim on a catalog question (fallback): the answer
+       asserts "não temos / não encontrei" for any product/catalog question,
+       even without an explicit price. Caught by _UNAVAILABILITY_RE.
     """
     if ai.tool_calls:
         return False
-    content = ai.content if isinstance(ai.content, str) else str(ai.content)
-    if not _UNAVAILABILITY_RE.search(content):
-        return False
     messages = state.get("messages") or []
-    if not _CATALOG_INTENT_RE.search(_last_human_text(messages)):
-        return False
     if _searched_in_recent_tail(messages):
         return False  # already searched; an empty result is a legit "não tem"
-    return True
+
+    last_human = _last_human_text(messages)
+    content = ai.content if isinstance(ai.content, str) else str(ai.content)
+
+    # An answer that already carries a concrete price ("R$ 1.799,90") is
+    # grounded in product data — don't force a re-search, that would disrupt a
+    # good answer. Only ungrounded/memory answers (no price shown) are suspect.
+    answer_has_price = bool(re.search(r"R\$\s*\d", content))
+
+    # Trigger 1 — a price/budget question answered from memory (no price shown).
+    if _PRICE_INTENT_RE.search(last_human) and not answer_has_price:
+        return True
+
+    # Trigger 2 — an unavailability claim on a catalog question.
+    if _UNAVAILABILITY_RE.search(content) and _CATALOG_INTENT_RE.search(last_human):
+        return True
+
+    return False
 
 
 async def supervisor_node(state: AgentStateV2) -> dict:
@@ -585,19 +627,37 @@ _JSON_INLINE_RE = re.compile(r"[\[{][^\[\]{}]*\"[^\[\]{}]*[\]}]")
 # backstop. We only strip it when it's a TRAILING standalone offer — a whole
 # final sentence/line that is just a generic "ask me anything" — never prose in
 # the middle of a real answer. Anchored to the END of the text.
+#
+# Two shapes, both as a TRAILING sentence:
+#   A) opens with a fixed boilerplate stem ("se precisar", "qualquer dúvida",
+#      "estou à disposição", "fico à disposição", "conte comigo").
+#   B) a conditional generic offer the model loves: "Se quiser ... / Se alguma
+#      (delas/dessas) ... " followed by a vague help phrase ("é só avisar",
+#      "posso verificar a disponibilidade", "posso ajudar", "mais
+#      informações/detalhes"). This is the genre Felipe rejects; it's distinct
+#      from a SPECIFIC contextual question ("Quer que eu veja o estoque DELA?")
+#      which we keep.
 _CANNED_CLOSING_RE = re.compile(
     r"(?ims)"
-    r"(?:\n|^|(?<=[.!?]))\s*"          # start of the trailing sentence/line
+    r"(?:\n|^|(?<=[.!?]))\s*"
     r"(?:"
-    r"se\s+(?:voc[êe]\s+)?precisar[^.\n!?]*"          # "se precisar (de ...) ..."
-    r"|qualquer\s+(?:d[úu]vida|coisa)[^.\n!?]*"        # "qualquer dúvida ..."
+    # A) fixed stems
+    r"se\s+(?:voc[êe]\s+)?precisar[^.\n!?]*"
+    r"|qualquer\s+(?:d[úu]vida|coisa)[^.\n!?]*"
     r"|se\s+(?:tiver|surgir)[^.\n!?]*(?:d[úu]vida|pergunta|quest)[^.\n!?]*"
     r"|estou\s+(?:[àa]\s+disposi[çc][ãa]o|aqui\s+(?:para|pra)\s+ajudar)[^.\n!?]*"
     r"|fico\s+(?:[àa]\s+disposi[çc][ãa]o|por\s+aqui)[^.\n!?]*"
     r"|conte\s+comigo[^.\n!?]*"
+    # B) conditional generic offer: "se quiser/alguma ... <help phrase>"
+    r"|se\s+(?:quiser|alguma|gostar|tiver\s+interesse|precisar)[^.\n!?]*"
+    r"(?:[ée]\s+s[óo]\s+(?:avisar|chamar|falar|pedir)"
+    r"|posso\s+(?:verificar|ajudar|fornecer|mostrar|te\s+ajudar)"
+    r"|me\s+(?:avise|chame|fale|diga|chama)"
+    r"|verificar\s+a\s+disponibilidade"
+    r"|mais\s+(?:detalhes|informa[çc][õo]es))[^.\n!?]*"
     r")"
-    r"(?:[.!]*)"                        # trailing punctuation/emoji
-    r"\s*$",                            # to the very end
+    r"(?:[.!…]*)"
+    r"\s*$",
 )
 
 

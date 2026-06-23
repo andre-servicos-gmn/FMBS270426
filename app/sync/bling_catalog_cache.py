@@ -98,6 +98,22 @@ class CatalogCache:
             )
             return
 
+        # Do NOT cache an EMPTY result as a valid snapshot. An empty list almost
+        # always means "sync never ran" or "DB pointed at the wrong place", not
+        # "the store has zero products". Caching it would serve [] for the whole
+        # TTL and make buscar_catalogo answer "catalogo indisponivel"/"não
+        # encontrei" — the exact production symptom. Keep _snapshot as-is (None
+        # on first load → caller still gets [] this once, but the NEXT call
+        # re-tries instead of being stuck behind the TTL) and log loudly.
+        if not snapshot:
+            elapsed_ms = (time.monotonic() - start) * 1000.0
+            logger.error(
+                "catalog_cache_empty refusing_to_cache (sync nunca rodou ou DB "
+                "errado?) had_prev=%s elapsed_ms=%.0f",
+                self._snapshot is not None, elapsed_ms,
+            )
+            return
+
         self._snapshot = snapshot
         self._loaded_at = time.monotonic()
         elapsed_ms = (self._loaded_at - start) * 1000.0

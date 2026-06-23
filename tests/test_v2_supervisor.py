@@ -536,14 +536,21 @@ def test_sanitize_strips_canned_closing_line():
         "Temos a Drop Shot Pentax a R$ 449. Se precisar de ajuda com outras faixas de preço ou produtos, é só avisar!",
         "Encontrei 3 opções. Qualquer dúvida, estou à disposição!",
         "A Kronos é ótima pra controle. Fico à disposição.",
+        # Real variants gpt-4o-mini emitted in production replay:
+        "Raquete A - R$ 449,00\nSe quiser saber mais sobre alguma delas ou verificar a disponibilidade, é só avisar!",
+        "Raquete X - R$ 469,00\nSe alguma delas te interessar, posso verificar a disponibilidade ou fornecer mais detalhes!",
+        "Raquete Y - R$ 469,00\nSe alguma dessas opções te interessar, posso verificar a disponibilidade em estoque ou ajudar com mais informações.",
     ]
     for raw in cases:
         out = _sanitize_for_whatsapp(raw)
-        assert "é só avisar" not in out.lower()
-        assert "à disposição" not in out.lower() and "a disposicao" not in out.lower()
-        assert "qualquer dúvida" not in out.lower()
+        low = out.lower()
+        assert "é só avisar" not in low and "so avisar" not in low
+        assert "à disposição" not in low and "a disposicao" not in low
+        assert "qualquer dúvida" not in low
+        assert "verificar a disponibilidade" not in low
+        assert "fornecer mais detalhes" not in low and "mais informações" not in low
         # The real content above the closing survives.
-        assert any(tok in out for tok in ("R$", "Kronos", "opções", "Drop Shot"))
+        assert any(tok in out for tok in ("R$", "Kronos", "opções", "Drop Shot", "Raquete"))
 
 
 def test_sanitize_keeps_contextual_question_offer():
@@ -606,6 +613,26 @@ def test_should_force_search_detects_ungrounded_unavailability():
     state = {"messages": [HumanMessage(content="tem raquetes até 1k?")]}
     ai = AIMessage(content="Não encontrei raquetes de Beach Tennis abaixo de R$ 1000.", tool_calls=[])
     assert _should_force_search(state, ai) is True
+
+
+def test_should_force_search_on_price_question_regardless_of_phrasing():
+    """The production bug: a PRICE question answered without searching must
+    force a search no matter how the model phrased the (non-)answer — we don't
+    depend on recognizing a 'não temos' string."""
+    from app.agent.supervisor import _should_force_search
+    price_questions = [
+        "tem raquetes até 1k?",
+        "e até 2 mil reais?",
+        "quero as mais baratas",
+        "qual a mais em conta?",
+        "quanto custa uma raquete boa?",
+        "tem alguma abaixo de 800?",
+    ]
+    # An answer that does NOT contain any unavailability phrase — pure memory guess.
+    vague = AIMessage(content="As raquetes de beach tennis variam bastante de preço.", tool_calls=[])
+    for q in price_questions:
+        state = {"messages": [HumanMessage(content=q)]}
+        assert _should_force_search(state, vague) is True, f"did not force search for: {q!r}"
 
 
 def test_should_not_force_when_model_answered_with_tool_call():

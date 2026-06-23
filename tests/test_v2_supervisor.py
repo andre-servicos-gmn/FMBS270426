@@ -50,7 +50,22 @@ _FIXTURE_CATALOG = [
     # A cheap NON-racket near the same price, to prove racket-restriction works.
     {"id": 16700000003, "name": "Bolsa Raqueteira Beach Tennis Generica",
      "marca": "Generica", "modelo": "Bag", "price_cents": 120000,
-     "categoria_nome": "Bolsas"},
+     "categoria_nome": "RAQUETEIRAS MOCHILA"},
+    # A tennis racket (NOT beach tennis) — categoria text says "raquete" but the
+    # curated flag is False. Must NEVER show for categoria="beach tennis".
+    {"id": 16700000006, "name": "Raquete de Tenis Wilson Pro Staff",
+     "marca": "Wilson", "modelo": "Pro Staff", "price_cents": 89900,
+     "categoria_nome": "RAQUETE TENIS", "is_raquete_praia": False},
+    # A pickleball racket near the cheap band — same trap, different sport.
+    {"id": 16700000007, "name": "Raquete de Pickleball Joola Ben Johns",
+     "marca": "Joola", "modelo": "Ben Johns", "price_cents": 79900,
+     "categoria_nome": "Raquete de pickleball", "is_raquete_praia": False},
+    # A frescobol kit MIS-FLAGGED is_raquete_praia=True (real catalog data gap):
+    # the cheapest "racket" by price, but not a single beach-tennis racket. Must
+    # be excluded so it never leads a "mais barata" list.
+    {"id": 16700000008, "name": "Frescobol Kit Tenis Praia 2 Raquetes 1 Bolinha",
+     "marca": "Head", "modelo": "Kit", "price_cents": 16900,
+     "categoria_nome": "Raquetes de Praia", "is_raquete_praia": True},
     # Products with tokens that 'baran' transposes into ("branco"/"branca") —
     # the production false-match. Must NOT be returned for "Baran".
     {"id": 16700000004, "name": "Boné Drop Shot Trucker Cor Branco",
@@ -62,7 +77,9 @@ _FIXTURE_CATALOG = [
 ]
 
 
-async def _run_buscar(consulta: str, preco_min=None, preco_max=None) -> list[dict]:
+async def _run_buscar(
+    consulta: str, preco_min=None, preco_max=None, categoria=None, ordenacao=None
+) -> list[dict]:
     """Call buscar_catalogo with the fixture catalog patched in."""
     from app.agent import tools_v2
 
@@ -74,6 +91,10 @@ async def _run_buscar(consulta: str, preco_min=None, preco_max=None) -> list[dic
         args["preco_min"] = preco_min
     if preco_max is not None:
         args["preco_max"] = preco_max
+    if categoria is not None:
+        args["categoria"] = categoria
+    if ordenacao is not None:
+        args["ordenacao"] = ordenacao
 
     with patch.object(tools_v2, "get_catalog_snapshot", fake_snapshot, create=True):
         # get_catalog_snapshot is imported lazily inside the tool; patch the
@@ -212,6 +233,64 @@ async def test_buscar_catalogo_name_only_unchanged_no_regression():
     assert "kronos" in _names(results)[0].lower()
     # No price params → name-relevance top-5 (the legacy shape).
     assert len(results) <= 5
+
+
+# ── 1c. Category filter + ordenacao ──────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_buscar_catalogo_beach_tennis_category_excludes_other_sports():
+    """categoria='beach tennis' filters on the curated is_raquete_praia flag —
+    a tennis racket, a pickleball racket, and a bag (all with 'raquete' in
+    their name/category) must NOT appear."""
+    results = await _run_buscar("raquete de beach tennis", categoria="beach tennis")
+    names = [n.lower() for n in _names(results)]
+    assert names, "category browse returned nothing"
+    assert not any("tenis wilson" in n or "pickleball" in n for n in names), \
+        f"other-sport racket leaked: {_names(results)}"
+    assert not any("bolsa" in n or "raqueteira" in n for n in names), \
+        f"bag leaked into beach tennis: {_names(results)}"
+
+
+@pytest.mark.asyncio
+async def test_buscar_catalogo_pure_category_and_sort_no_name():
+    """'as mais baratas de beach tennis' — no distinctive name to match, just
+    categoria + ordenacao=preco_asc. Must return beach tennis rackets ordered
+    cheapest-first, WITHOUT depending on the fuzzy name match."""
+    results = await _run_buscar(
+        "as mais baratas", categoria="beach tennis", ordenacao="preco_asc"
+    )
+    assert results, "pure category+sort returned nothing"
+    prices = [_price_to_float(r["preco"]) for r in results]
+    assert prices == sorted(prices), f"not ascending: {prices}"
+    # The mis-flagged Frescobol kit (cheapest by price) must NOT lead the list.
+    assert "frescobol" not in _names(results)[0].lower(), \
+        f"frescobol kit led the 'mais baratas' list: {_names(results)}"
+
+
+@pytest.mark.asyncio
+async def test_buscar_catalogo_frescobol_kit_excluded_from_beach_tennis():
+    """The R$169 Frescobol kit is mis-flagged is_raquete_praia=True; it must be
+    excluded from beach-tennis-racket results entirely."""
+    results = await _run_buscar("raquete de beach tennis", categoria="beach tennis")
+    assert not any("frescobol" in n.lower() for n in _names(results)), \
+        f"frescobol kit leaked: {_names(results)}"
+
+
+@pytest.mark.asyncio
+async def test_buscar_catalogo_category_plus_price_combined():
+    """'raquete de beach tennis até 1500' = categoria + preco_max, every result
+    a beach tennis racket within the band, cheapest-first, no junk."""
+    results = await _run_buscar(
+        "raquete de beach tennis", categoria="beach tennis", preco_max=1500
+    )
+    names = [n.lower() for n in _names(results)]
+    for r in results:
+        assert _price_to_float(r["preco"]) <= 1500, f"{r['nome']} over 1500"
+    assert not any(
+        w in n for n in names
+        for w in ("bolsa", "raqueteira", "pickleball", "tenis wilson", "frescobol")
+    ), f"junk leaked: {_names(results)}"
 
 
 # ════════════════════════════════════════════════════════════════════════════

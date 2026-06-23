@@ -147,44 +147,141 @@ _RACKET_HINT_TOKENS = {"raquete", "raquetes", "raqueta"}
 
 
 def _price_reais(product: dict[str, Any]) -> float | None:
+    """Reais price, or None when the product has no usable price.
+
+    A price of 0 is treated as "no price" — in the synced catalog ~33 active
+    products have ``preco`` null/0; surfacing them as "free" would poison a
+    ``preco_asc`` ordering (they'd float to the top) and a price filter (they'd
+    look cheaper than everything). So 0 → None → excluded from price queries.
+    """
     cents = product.get("price_cents")
     if cents is None:
         return None
     try:
-        return int(cents) / 100.0
+        reais = int(cents) / 100.0
     except (TypeError, ValueError):
         return None
+    return reais if reais > 0 else None
+
+
+# Category routing. The synced ``categoria_nome`` is free-text Bling noise (56
+# distinct values, broken accents, and — critically — THREE racket categories
+# that are NOT beach tennis: "Raquete de pickleball", "RAQUETE TENIS",
+# "RAQUETE PADEL"). So "raquete de beach tennis" can NOT be matched by the
+# word "raquete" in the category text. The reliable signal is the curated
+# boolean ``is_raquete_praia`` (set in the sync from a Bling custom field +
+# exact category match). Beach-tennis-racket queries route through it; other
+# categories fall back to substring on the category text.
+_BEACH_TENNIS_ALIASES = {
+    "beach tennis", "beach", "praia", "raquete de praia", "raquete de beach",
+    "raquetes de praia", "bt",
+}
+
+
+def _wants_beach_tennis(categoria: str | None) -> bool:
+    if not categoria:
+        return False
+    norm = _norm(categoria)
+    if norm in {_norm(a) for a in _BEACH_TENNIS_ALIASES}:
+        return True
+    # "raquete de beach tennis", "raquete beach", etc. — beach/praia present
+    # and NOT another racket sport (padel/tenis/pickleball).
+    has_beach = "beach" in norm or "praia" in norm
+    other_sport = any(w in norm for w in ("padel", "tenis", "pickleball", "pickle"))
+    return has_beach and not other_sport
+
+
+# Name tokens that mean "this is NOT a single beach-tennis racket" even when
+# the curated flag says raquete_praia. One real catalog entry — a "Frescobol
+# Kit Tênis Praia 2 Raquetes" at R$169 — is mis-flagged is_raquete_praia=True
+# and would otherwise lead a "mais barata" list as a R$169 racket. Frescobol is
+# a different sport and a "kit" is not a single racket. This is a SYNC DATA
+# GAP (the Bling custom field is wrong); guarding here keeps UX correct until
+# the flag is fixed upstream.
+_NOT_A_RACKET_NAME_TOKENS = {"frescobol"}
+
+
+def _is_beach_tennis_racket(product: dict[str, Any]) -> bool:
+    """Curated beach-tennis-racket flag, minus the known mis-flagged noise."""
+    if not product.get("is_raquete_praia"):
+        return False
+    name_tokens = set(_tokens(str(product.get("name") or "")))
+    return not (name_tokens & _NOT_A_RACKET_NAME_TOKENS)
 
 
 def _is_racket(product: dict[str, Any]) -> bool:
-    if product.get("is_raquete_praia"):
+    if _is_beach_tennis_racket(product):
         return True
     # Token-level match so "raqueteira" (bag) / "raqueteira" don't count as a
     # racket — "raquete"/"raquetes" must appear as a whole word, and the
     # category is the strongest signal.
-    cat_tokens = set(_tokens(str(product.get("categoria_nome") or "")))
     name_tokens = set(_tokens(str(product.get("name") or "")))
+    # A "Frescobol Kit ... 2 Raquetes" is not a single racket the customer buys.
+    if name_tokens & _NOT_A_RACKET_NAME_TOKENS:
+        return False
+    cat_tokens = set(_tokens(str(product.get("categoria_nome") or "")))
     racket_words = {"raquete", "raquetes"}
     return bool((cat_tokens | name_tokens) & racket_words)
 
 
+def _matches_category(product: dict[str, Any], categoria: str) -> bool:
+    """True when the product belongs to the requested category.
+
+    Beach-tennis rackets route through the curated ``is_raquete_praia`` flag —
+    NEVER the free-text category — so bags ("RAQUETEIRAS MOCHILA"), glasses,
+    anti-vibrators, and tennis/pickleball/padel rackets are excluded even
+    though their name or category text may contain "raquete"/"beach". Any other
+    category falls back to an accent-insensitive substring on the category text.
+    """
+    if _wants_beach_tennis(categoria):
+        return _is_beach_tennis_racket(product)
+    cat_norm = _norm(str(product.get("categoria_nome") or ""))
+    return _norm(categoria) in cat_norm if cat_norm else False
+
+
 @tool
 async def buscar_catalogo(
-    consulta: str, preco_min: float | None = None, preco_max: float | None = None
+    consulta: str = "",
+    preco_min: float | None = None,
+    preco_max: float | None = None,
+    categoria: str | None = None,
+    ordenacao: str | None = None,
 ) -> str:
-    """Busca produtos no catálogo da Base Sports por nome, marca ou características.
+    """Busca produtos no catálogo da Base Sports por nome, marca, categoria ou faixa de preço.
     Use sempre que o cliente mencionar um produto, pedir comparação, ou perguntar o que existe.
     Para comparar dois produtos, chame uma vez para cada. Retorna lista com id, nome e preço.
 
-    Use preco_max e preco_min (em reais) para faixa de preço. Ex: "até 2k" →
-    preco_max=2000; "entre 1000 e 1500" → preco_min=1000, preco_max=1500; "as
-    mais baratas" → não passe faixa, mas a busca já ordena por preço quando há
-    filtro de preço. SEMPRE chame esta ferramenta com o filtro de preço antes de
-    dizer que não há produto numa faixa."""
+    consulta: nome/marca do produto. Pode ser vazio quando a busca é só por
+    categoria e/ou preço (ex: "as mais baratas de beach tennis" não tem nome).
+
+    preco_min/preco_max (em reais): faixa de preço. Ex: "até 2k" → preco_max=2000;
+    "entre 1000 e 1500" → preco_min=1000, preco_max=1500; "abaixo de mil" →
+    preco_max=1000.
+
+    categoria: filtra por tipo de produto. Use "beach tennis" para raquete de
+    beach tennis, "padel" para padel, "mochila"/"raqueteira" para bolsa, etc.
+    NÃO misture: "raquete de beach tennis" filtra só beach tennis, sem mochila
+    nem acessório.
+
+    ordenacao: passe "preco_asc" quando o cliente pedir "as mais baratas",
+    "a mais barata" ou "mais em conta" — ordena do mais barato pro mais caro.
+
+    Combine os três: "raquete de beach tennis até 1000" → categoria="beach tennis",
+    preco_max=1000. "as mais baratas de beach tennis" → categoria="beach tennis",
+    ordenacao="preco_asc" (sem nome, é só categoria + ordem).
+
+    SEMPRE chame esta ferramenta com preco_max E categoria antes de dizer que
+    não há produto numa faixa de preço."""
     q_tokens = _content_tokens(consulta)
     raw_tokens = set(_tokens(consulta))
     wants_racket = bool(raw_tokens & _RACKET_HINT_TOKENS)
     has_price_filter = preco_min is not None or preco_max is not None
+    has_category = bool(categoria and categoria.strip())
+    sort_by_price = (ordenacao or "").strip().lower() == "preco_asc"
+    # Price ordering kicks in for a price filter, an explicit preco_asc, OR a
+    # category-only browse (a "show me beach tennis rackets" list reads best
+    # cheapest-first). Name-only searches keep relevance ordering.
+    price_ordered = has_price_filter or sort_by_price or has_category
 
     products: list[dict[str, Any]] = []
     # Primary: full in-memory snapshot (same path the legacy recommend uses).
@@ -206,11 +303,20 @@ async def buscar_catalogo(
     if not products:
         return json.dumps({"resultados": [], "aviso": "catalogo indisponivel"}, ensure_ascii=False)
 
+    # ── Category filter ───────────────────────────────────────────────────────
+    # Explicit categoria param wins. Otherwise, a price/sort query that mentions
+    # "raquete" still restricts to (beach-tennis) rackets so the customer asking
+    # "raquete até 1000" never gets a bag or anti-vibrator.
+    if has_category:
+        products = [p for p in products if _matches_category(p, categoria)]
+    elif (has_price_filter or sort_by_price) and wants_racket:
+        products = [p for p in products if _is_racket(p)]
+
     # ── Price filter ─────────────────────────────────────────────────────────
     if has_price_filter:
         def _in_range(p: dict[str, Any]) -> bool:
             price = _price_reais(p)
-            if price is None:
+            if price is None:  # null/0 price → not a real in-range product
                 return False
             if preco_min is not None and price < preco_min:
                 return False
@@ -219,21 +325,19 @@ async def buscar_catalogo(
             return True
 
         products = [p for p in products if _in_range(p)]
-        # Restrict to rackets when the query signals "raquete" (the name token
-        # "raquete" is a stopword for relevance, so it can't restrict on its own).
-        if wants_racket:
-            products = [p for p in products if _is_racket(p)]
+    elif price_ordered:
+        # Cheapest-first ordering only makes sense over priced products — drop
+        # the null/0-price entries so they don't head the list as "free".
+        products = [p for p in products if _price_reais(p) is not None]
 
     # ── Ranking ──────────────────────────────────────────────────────────────
-    if has_price_filter:
-        # Price range → order by price ascending, return a bounded top-N.
-        # Apply name relevance as a secondary signal when there ARE distinctive
-        # name tokens (beyond the racket hint), else pure price order.
+    if price_ordered:
+        # Price/category browse → order by price ascending, bounded top-N.
+        # When there ARE distinctive name tokens, a name match floats up first
+        # (score desc) and price breaks ties; otherwise it's pure price order —
+        # so "as mais baratas de beach tennis" works WITHOUT a name to match.
         if q_tokens:
             scored = [(p, _score_product(q_tokens, p)) for p in products]
-            # Keep all in-range products even with score 0 — the price filter
-            # already did the meaningful restriction. Sort by (score desc,
-            # price asc) so a name match floats up but cheap items still show.
             scored.sort(key=lambda ps: (-ps[1], _price_reais(ps[0]) or float("inf")))
             ranked = [p for p, _ in scored[:_PRICE_RANGE_TOP_N]]
         else:
@@ -252,8 +356,8 @@ async def buscar_catalogo(
         for p in ranked
     ]
     logger.info(
-        "buscar_catalogo q_tokens=%d price_filter=%s racket=%s results=%d",
-        len(q_tokens), has_price_filter, wants_racket, len(out),
+        "buscar_catalogo q_tokens=%d price_filter=%s categoria=%s sort=%s racket=%s results=%d",
+        len(q_tokens), has_price_filter, categoria, sort_by_price, wants_racket, len(out),
     )
     return json.dumps(out, ensure_ascii=False)
 

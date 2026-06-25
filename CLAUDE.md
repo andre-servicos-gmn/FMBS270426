@@ -20,7 +20,7 @@ Este é um projeto da **Nouvaris**. Os padrões de código, segurança e estrutu
 
 - Python 3.11
 - FastAPI 0.115+
-- LangGraph 0.2+ (com `MemorySaver`; troca por `RedisSaver` está no roadmap)
+- LangGraph 0.2+ (checkpointer real: `AsyncRedisSaver`, TTL 7d sliding — ver `app/agent/checkpointer.py`)
 - OpenAI Python SDK (chat, embeddings, Whisper, vision)
 - redis-py (asyncio)
 - asyncpg + pgvector (via Supabase)
@@ -216,7 +216,7 @@ Se um teste quebrar, **não pare**: corrija e rode de novo.
 - Estado é `TypedDict` com `add_messages` reducer pra histórico
 - Cada nó é função `async` que recebe `state` e retorna `dict` parcial
 - Decisões de roteamento ficam em `conditional_edges` baseadas em `state["intent"]` (e em flags como `recommended_products` para distinguir primeira recomendação vs follow-up)
-- Checkpointer: hoje `MemorySaver` (in-memory). Sprint 3 troca por `RedisSaver` (langgraph-checkpoint-redis) com namespace por hash do telefone
+- Checkpointer: `AsyncRedisSaver` (langgraph-checkpoint-redis) com TTL 7d sliding (`refresh_on_read=True`) e `thread_id=phone_hash`. Já migrado de `MemorySaver` — ver `app/agent/checkpointer.py`. NÃO é a causa de "estado vazando entre turnos"
 
 ## Arquitetura conversacional (Sprint 2.6 — refatoração estratégica)
 
@@ -276,7 +276,7 @@ O agente é **deliberadamente raso** no diagnóstico para preservar o valor da *
 > **ESCOPO.md é a fonte de verdade do roadmap.** Consultar antes de qualquer mudança de sprint. O resumo abaixo reflete a ordem definida lá; em caso de divergência, ESCOPO.md prevalece.
 
 ### Sprint 1 — MVP WhatsApp
-- Migrar `MemorySaver` → `RedisSaver` (langgraph-checkpoint-redis) com TTL de 7 dias, mantendo `thread_id=phone_hash`
+- ✅ **Feito** — Migrado `MemorySaver` → `AsyncRedisSaver` (langgraph-checkpoint-redis) com TTL de 7 dias sliding, `thread_id=phone_hash` (`app/agent/checkpointer.py`)
 - Adicionar slots `regiao_lesao` e `modelo_desejado` no `player_profile`, com regras de coleta no `SYSTEM_DIAGNOSE` (pergunta de região condicionada a `lesoes != "nenhuma"`)
 - Conectar Evolution API real: preencher `.env`, configurar webhook no painel apontando para o túnel ngrok
 - CTA de fechamento com dados reais da loja (`STORE_NAME`, `STORE_ADDRESS`, `STORE_HOURS`, `STORE_MAPS_URL`, `STORE_PHONE`) injetados no contexto do `close_node`

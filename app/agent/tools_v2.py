@@ -141,6 +141,38 @@ def _score_product(q_tokens: list[str], product: dict[str, Any]) -> float:
 # still bounded so the LLM context doesn't blow up).
 _PRICE_RANGE_TOP_N = 8
 
+
+def _spread_by_price(products: list[dict[str, Any]], n: int) -> list[dict[str, Any]]:
+    """Pick ``n`` products SPREAD across the price range, not the n cheapest.
+
+    Production bug: a "raquetes até 2 mil" query returned the 8 CHEAPEST
+    (R$449-469, all the same line), so the LLM only ever saw the bottom of the
+    range and the answer read like a dump of near-identical prices. The customer
+    asked for a ceiling, not for "the cheapest" — they want to see the SPREAD
+    (one cheap, one mid, one near the ceiling) so they can place themselves.
+
+    Given a price-ASCENDING list, sample ``n`` items at evenly spaced indices
+    (``round(i*(len-1)/(n-1))``) so the result always includes the cheapest AND
+    the most expensive within the cap, with mid points between. Dedupes indices
+    (small lists can collapse two picks onto one index) and preserves price order.
+
+    For the cheapest-first intent ("as mais baratas") we do NOT call this — that
+    branch wants a true ascending head and is handled by the caller.
+    """
+    if n <= 0:
+        return []
+    if len(products) <= n:
+        return list(products)
+    last = len(products) - 1
+    seen: set[int] = set()
+    picked: list[dict[str, Any]] = []
+    for i in range(n):
+        idx = round(i * last / (n - 1))
+        if idx not in seen:
+            seen.add(idx)
+            picked.append(products[idx])
+    return picked
+
 # Tokens that signal the customer is asking specifically for a racket, so a
 # price-range query without a distinctive name still restricts to rackets.
 _RACKET_HINT_TOKENS = {"raquete", "raquetes", "raqueta"}
@@ -359,7 +391,15 @@ async def buscar_catalogo(
             ranked = [p for p, _ in scored[:_PRICE_RANGE_TOP_N]]
         else:
             products.sort(key=lambda p: _price_reais(p) or float("inf"))
-            ranked = products[:_PRICE_RANGE_TOP_N]
+            # A price CEILING/RANGE ("até 2 mil", "entre 1000 e 1500") without an
+            # explicit cheapest-first ask → SPREAD across the range so the LLM
+            # sees one cheap, one mid, one near the cap (the production fix: it
+            # used to get the 8 cheapest, all R$449-469). An explicit "as mais
+            # baratas" (sort_by_price) keeps the true ascending head.
+            if has_price_filter and not sort_by_price:
+                ranked = _spread_by_price(products, _PRICE_RANGE_TOP_N)
+            else:
+                ranked = products[:_PRICE_RANGE_TOP_N]
     elif q_tokens:
         scored = [(p, _score_product(q_tokens, p)) for p in products]
         scored = [(p, s) for p, s in scored if s > 0]
@@ -372,9 +412,16 @@ async def buscar_catalogo(
         {"id": str(p.get("id")), "nome": p.get("name"), "preco": _price_brl(p.get("price_cents"))}
         for p in ranked
     ]
+    # Price range of what we actually returned — lets us audit that a ceiling
+    # query came back SPREAD (low..high) rather than clustered at the bottom.
+    ranked_prices = [pr for pr in (_price_reais(p) for p in ranked) if pr is not None]
+    price_lo = min(ranked_prices) if ranked_prices else None
+    price_hi = max(ranked_prices) if ranked_prices else None
     logger.info(
-        "buscar_catalogo q_tokens=%d price_filter=%s categoria=%s sort=%s racket=%s results=%d",
-        len(q_tokens), has_price_filter, categoria, sort_by_price, wants_racket, len(out),
+        "buscar_catalogo q_tokens=%d price_filter=%s categoria=%s sort=%s racket=%s "
+        "results=%d price_range=%s..%s",
+        len(q_tokens), has_price_filter, categoria, sort_by_price, wants_racket,
+        len(out), price_lo, price_hi,
     )
     return json.dumps(out, ensure_ascii=False)
 

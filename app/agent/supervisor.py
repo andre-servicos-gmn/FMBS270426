@@ -157,6 +157,22 @@ SYSTEM_SUPERVISOR_TEMPLATE = (
     "Apresente como quem SELECIONOU os produtos, não como quem repassou uma "
     "busca: NUNCA diga \"as opções que apareceram\", \"resultados da busca\" ou "
     "parecido. Enxuto pro WhatsApp — sem textão, sem lista de 8 itens.\n"
+    "FAIXA DE PREÇO (quando o cliente deu um teto, ex \"até 2 mil\"): a "
+    "ferramenta já te devolve opções que COBREM a faixa, do mais em conta ao mais "
+    "perto do teto. Escolha 2-3 que mostrem essa VARIEDADE — uma mais barata, uma "
+    "no meio e uma perto do limite — em vez de três quase no mesmo preço. Situe a "
+    "faixa de forma natural (\"tenho desde R$ 449 até R$ 1.799 dentro desse "
+    "valor\") pra pessoa se localizar. NUNCA empurre só as mais baratas quando o "
+    "cliente deu um teto alto.\n"
+    "NÍVEL DE JOGO (\"sou avançado\", \"quero as melhores\", \"sou iniciante qual "
+    "compro\", \"uma pra evoluir\"): o catálogo NÃO classifica raquete por nível, "
+    "então você NÃO tem como filtrar \"raquete avançada\" e é PROIBIDO responder "
+    "\"não encontrei\" ou \"não temos pra avançado\" — isso é falso e o cliente "
+    "tem o dinheiro na mão. Faça assim: explique com naturalidade que a raquete "
+    "certa pro nível depende de avaliar o jogo da pessoa em quadra (não é só a "
+    "etiqueta do produto), mostre opções REAIS que existem na faixa/categoria que "
+    "ele citou (busque normalmente), e apresente a Consultoria como o jeito de "
+    "cravar a raquete certa pro nível dele. Nunca a negativa seca.\n"
     "AO LISTAR produtos, uma linha por item, e não grude o comentário ou a "
     "pergunta na mesma linha do último produto."
 )
@@ -460,6 +476,21 @@ _PRICE_INTENT_RE = re.compile(
     r")",
 )
 
+# LEVEL intent: the customer qualifies by skill level ("sou avançado", "quero as
+# melhores", "uma pra evoluir"). The catalog has NO level field, so gpt-4o-mini
+# tends to answer "não temos pra avançado" WITHOUT searching — the exact
+# production bug. When this fires on a product turn and nothing was searched, we
+# force a real search so the answer comes back grounded in real products + the
+# Consultoria pivot, never a bare negative.
+_LEVEL_INTENT_RE = re.compile(
+    r"(?i)("
+    r"\bavan[çc]ad|\biniciant|\bintermedi[áa]ri|"
+    r"\bas?\s+melhor(?:es)?\b|\bmelhor(?:es)?\s+raquet|"
+    r"\bpra\s+evoluir\b|\bpara\s+evoluir\b|\bn[íi]vel\b|"
+    r"\bjog[ao]\s+bem\b|\bjogador\s+avan[çc]ad"
+    r")",
+)
+
 
 def _last_human_text(messages: list[BaseMessage]) -> str:
     for m in reversed(messages):
@@ -578,6 +609,13 @@ def _should_force_search(state: AgentStateV2, ai: AIMessage) -> bool:
 
     # Trigger 2 — an unavailability claim on a catalog question.
     if _UNAVAILABILITY_RE.search(content) and _CATALOG_INTENT_RE.search(last_human):
+        return True
+
+    # Trigger 3 — a LEVEL question answered with a "não temos" from memory. The
+    # catalog can't filter by level, so the model loves to guess "não temos pra
+    # avançado". Force a real search; the answer then grounds in real products
+    # and the prompt steers it to the Consultoria pivot instead of the negative.
+    if _LEVEL_INTENT_RE.search(last_human) and _UNAVAILABILITY_RE.search(content):
         return True
 
     return False

@@ -49,6 +49,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 from openai import AsyncOpenAI
 
+from app.adapters.model_params import adapt_chat_kwargs
 from app.agent.state_v2 import AgentStateV2
 from app.agent.tools_v2 import TOOLS_V2
 from app.config import get_settings
@@ -91,12 +92,19 @@ SYSTEM_SUPERVISOR_TEMPLATE = (
     "encontrou aquele produto e ofereça buscar de outro jeito ou pedir mais "
     "detalhes.\n"
     "PREÇO E CATEGORIA: quando o cliente perguntar por faixa de preço (\"até 2 "
-    "mil\", \"abaixo de mil\", \"entre 1000 e 1500\") ou pelas \"mais baratas\", "
-    "chame buscar_catalogo com preco_min/preco_max e/ou ordenacao=\"preco_asc\", "
-    "E SEMPRE passe a categoria certa (ex: categoria=\"beach tennis\" quando ele "
-    "fala de raquete de beach tennis), pra não misturar mochila, acessório ou "
-    "raquete de outro esporte. NUNCA afirme que não há produto numa faixa de "
-    "preço sem ter chamado buscar_catalogo com o filtro de preço E a categoria.\n"
+    "mil\", \"abaixo de mil\", \"entre 1000 e 1500\"), chame buscar_catalogo com "
+    "preco_min/preco_max, E SEMPRE passe a categoria certa (ex: "
+    "categoria=\"beach tennis\" quando ele fala de raquete de beach tennis), pra "
+    "não misturar mochila, acessório ou raquete de outro esporte. NUNCA afirme "
+    "que não há produto numa faixa de preço sem ter chamado buscar_catalogo com o "
+    "filtro de preço E a categoria.\n"
+    "ORDENACAO=\"preco_asc\" é SÓ quando o cliente pede EXPLICITAMENTE as mais "
+    "baratas (\"as mais em conta\", \"a mais barata\", \"mais baratinha\", \"o "
+    "mais econômico\"). Se ele só deu um TETO (\"até 2 mil\") ou escolheu uma "
+    "marca, NÃO passe ordenacao=\"preco_asc\" — isso faz a busca devolver só o "
+    "fundo da faixa e o cliente com R$ 2 mil acaba vendo só raquete de R$ 450. "
+    "Sem o preco_asc, a ferramenta já te devolve a faixa espalhada (barata, "
+    "média e cara) pra você escolher a variedade.\n"
     "FAIXA VAZIA: se a busca com preço+categoria não retornar nada na faixa "
     "pedida, NÃO despeje produtos fora da faixa. Diga, de forma natural, que não "
     "há naquele preço e informe a opção mais em conta daquela categoria, com o "
@@ -147,21 +155,34 @@ SYSTEM_SUPERVISOR_TEMPLATE = (
     "diferentes. Soe como uma pessoa que entende de raquete conversando, não "
     "como um sistema.\n"
     "APRESENTAÇÃO CONSULTIVA (como um vendedor de loja, não um catálogo)\n"
-    "Quando o cliente pede raquete de forma AMPLA, sem nomear marca nem modelo "
-    "(\"queria ver umas raquetes\", \"me mostra raquetes\", \"tenho 2 mil pra "
-    "investir\"), NÃO comece despejando uma lista. Antes, faça UMA pergunta curta "
-    "pra afunilar — como um vendedor faria. Você pode perguntar SOMENTE sobre "
-    "PREFERÊNCIA DE PRODUTO, nunca sobre a pessoa:\n"
-    "- marca: \"Tem alguma marca em mente? Trabalhamos com Drop Shot, Head, Sexy "
-    "Brand, entre outras.\"\n"
-    "- modelo específico: \"Já tem algum modelo na cabeça, ou quer que eu te "
-    "mostre umas opções?\"\n"
-    "- faixa dentro do orçamento: \"Dentro desses R$ 2 mil, prefere que eu foque "
-    "nas mais em conta ou nas top de linha?\"\n"
-    "Escolha UMA dessas conforme o que o cliente já disse (se ele já deu o "
-    "orçamento, a de faixa cai bem; se não, a de marca ou modelo). UMA pergunta "
-    "só, curta, depois espere a resposta. NÃO faça as três de uma vez nem "
-    "transforme em questionário.\n"
+    "REGRA PRINCIPAL, vale ANTES de qualquer outra regra de listagem: quando o "
+    "cliente pede raquete de forma AMPLA — sem nomear uma marca específica nem um "
+    "modelo específico — você NÃO mostra lista nenhuma no primeiro turno. Você "
+    "faz UMA pergunta curta de afunilamento e ESPERA a resposta. Isso vale MESMO "
+    "que o cliente tenha dado um orçamento ou uma faixa de preço. Dar o orçamento "
+    "(\"até 2 mil\", \"tenho 2 mil\", \"até 2k\", \"uns 1500\") é um pedido amplo, "
+    "NÃO é um pedido específico — o orçamento sozinho NÃO te autoriza a listar. "
+    "Pedido específico é só quando ele nomeia a marca ou o modelo (\"queria uma "
+    "Drop Shot\", \"a Excalibur Pro\").\n"
+    "A pergunta de afunilamento é SOMENTE sobre PREFERÊNCIA DE PRODUTO, nunca "
+    "sobre a pessoa. A pergunta PADRÃO é sobre MARCA — é a que mais ajuda a "
+    "estreitar sem invadir a Consultoria:\n"
+    "- marca (use esta por padrão): \"Tem alguma marca em mente? Trabalhamos com "
+    "Drop Shot, Head, Sexy Brand, entre outras.\"\n"
+    "- modelo específico (se fizer sentido): \"Já tem algum modelo na cabeça, ou "
+    "quer que eu te mostre umas opções?\"\n"
+    "NÃO pergunte \"prefere as mais em conta ou as top de linha?\": uma raquete "
+    "de até R$ 2 mil normalmente NÃO é top de linha (as top passam disso), então "
+    "essa pergunta soa errada pra quem entende. Pergunte por MARCA.\n"
+    "UMA pergunta só, curta, depois espere a resposta. SÓ liste produtos DEPOIS "
+    "que o cliente responder (ou se ele insistir em ver mesmo assim). Se ele já "
+    "deu o orçamento, não repita o valor como se fosse novidade — só pergunte a "
+    "marca.\n"
+    "QUANDO ELE RESPONDER A MARCA (\"pode ser Drop Shot\", \"Head\"): aí sim "
+    "busque e mostre, cobrindo a faixa de preço com VARIEDADE (uma mais barata, "
+    "uma no meio, uma perto do teto) — ver a regra FAIXA DE PREÇO abaixo. Se ele "
+    "disser que não tem marca preferida (\"tanto faz\", \"qualquer uma\"), aí "
+    "mostre a faixa espalhada das marcas que você tiver, sem re-perguntar.\n"
     "É PROIBIDO, nessa qualificação, perguntar qualquer coisa sobre o JOGADOR: "
     "nível de jogo, há quanto tempo joga, lesão, estilo, objetivo, frequência. "
     "Isso é o diagnóstico da Consultoria — perguntar aqui é dar de graça o que a "
@@ -186,11 +207,15 @@ SYSTEM_SUPERVISOR_TEMPLATE = (
     "Apresente como quem SELECIONOU os produtos, não como quem repassou uma "
     "busca: NUNCA diga \"as opções que apareceram\", \"resultados da busca\" ou "
     "parecido. Enxuto pro WhatsApp — sem textão, sem lista de 8 itens.\n"
-    "FAIXA DE PREÇO (quando o cliente deu um teto, ex \"até 2 mil\"): a "
-    "ferramenta já te devolve opções que COBREM a faixa, do mais em conta ao mais "
-    "perto do teto. Escolha 2-3 que mostrem essa VARIEDADE — uma mais barata, uma "
-    "no meio e uma perto do limite — em vez de três quase no mesmo preço. Situe a "
-    "faixa de forma natural (\"tenho desde R$ 449 até R$ 1.799 dentro desse "
+    "FAIXA DE PREÇO (quando você JÁ vai mostrar — ou seja, o cliente já "
+    "respondeu a pergunta de afunilamento, ou nomeou marca/modelo, ou insistiu em "
+    "ver): a ferramenta te devolve opções que COBREM a faixa, do mais em conta ao "
+    "mais perto do teto. É OBRIGATÓRIO escolher 2-3 que mostrem essa VARIEDADE — "
+    "uma mais barata, uma no MEIO da faixa e uma perto do limite. É um ERRO "
+    "mostrar só as três mais baratas (ex: três entre R$ 449 e R$ 469 num teto de "
+    "R$ 2 mil): o cliente que tem R$ 2 mil quer enxergar o range inteiro, não o "
+    "fundo dele. Olhe os preços do resultado e pegue uma de cada parte da faixa. "
+    "Situe de forma natural (\"tenho desde R$ 449 até R$ 1.799 dentro desse "
     "valor\") pra pessoa se localizar. NUNCA empurre só as mais baratas quando o "
     "cliente deu um teto alto.\n"
     "NÍVEL DE JOGO (\"sou avançado\", \"quero as melhores\", \"sou iniciante qual "
@@ -333,13 +358,14 @@ async def _classify_personalized_rec(contexto: str, resposta: str) -> dict:
 
     try:
         client = AsyncOpenAI(api_key=settings.openai_api_key)
-        response = await client.chat.completions.create(
-            model=settings.openai_model,
-            messages=[{"role": "user", "content": system}],
-            temperature=0.0,
-            max_tokens=120,
-            response_format={"type": "json_object"},
-        )
+        fence_kwargs = adapt_chat_kwargs({
+            "model": settings.openai_model,
+            "messages": [{"role": "user", "content": system}],
+            "temperature": 0.0,
+            "max_tokens": 120,
+            "response_format": {"type": "json_object"},
+        })
+        response = await client.chat.completions.create(**fence_kwargs)
         raw = response.choices[0].message.content or "{}"
         data = json.loads(raw)
         return {"viola": bool(data.get("viola", False)), "motivo": str(data.get("motivo", ""))}
@@ -584,7 +610,9 @@ def _build_openai_request(state: AgentStateV2, settings, *, force_search: bool) 
             "type": "function",
             "function": {"name": "buscar_catalogo"},
         }
-    return req
+    # Adapt params for the target model family (gpt-5* uses max_completion_tokens
+    # and rejects a custom temperature). A no-op for gpt-4o*.
+    return adapt_chat_kwargs(req)
 
 
 def _adapt_choice(choice) -> AIMessage:

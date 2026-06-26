@@ -388,7 +388,21 @@ async def buscar_catalogo(
         if distinctive:
             scored = [(p, _score_product(q_tokens, p)) for p in products]
             scored.sort(key=lambda ps: (-ps[1], _price_reais(ps[0]) or float("inf")))
-            ranked = [p for p, _ in scored[:_PRICE_RANGE_TOP_N]]
+            if has_price_filter and not sort_by_price:
+                # Brand/model query WITH a price ceiling (e.g. "Drop Shot até 2
+                # mil"). The name score ties across a whole line — every "Drop
+                # Shot" racket scores the same — so the price tie-break alone
+                # returns the N CHEAPEST (R$449-469), the exact bug the no-name
+                # branch already fixes with _spread_by_price. Keep only the
+                # NAME-RELEVANT products (score > 0) so we don't spread into
+                # unrelated brands, then SPREAD those across the price range so
+                # the customer sees cheap..mid..near-ceiling, not just the floor.
+                relevant = [p for p, s in scored if s > 0]
+                pool = relevant or [p for p, _ in scored]
+                pool.sort(key=lambda p: _price_reais(p) or float("inf"))
+                ranked = _spread_by_price(pool, _PRICE_RANGE_TOP_N)
+            else:
+                ranked = [p for p, _ in scored[:_PRICE_RANGE_TOP_N]]
         else:
             products.sort(key=lambda p: _price_reais(p) or float("inf"))
             # A price CEILING/RANGE ("até 2 mil", "entre 1000 e 1500") without an

@@ -4,6 +4,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from app.adapters.model_params import adapt_chat_kwargs
 from app.config import get_settings
 from app.security.pii_masker import is_clean, mask_pii
 
@@ -78,6 +79,9 @@ class OpenAIClient:
         }
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
+        # Adapt for the target model family: gpt-5* uses max_completion_tokens
+        # and rejects a custom temperature. No-op for gpt-4o*.
+        kwargs = adapt_chat_kwargs(kwargs)
 
         # ── 4. Call the API ─────────────────────────────────────────────────
         t0 = time.perf_counter()

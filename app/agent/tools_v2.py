@@ -30,6 +30,8 @@ from typing import Annotated, Any
 from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
 
+from app.config import get_settings
+
 logger = logging.getLogger(__name__)
 
 # Phonetic-fuzzy match threshold. Calibrated against the real catalog:
@@ -133,6 +135,42 @@ def _score_product(q_tokens: list[str], product: dict[str, Any]) -> float:
         if best >= _FUZZY_THRESHOLD:
             total += best
     return total
+
+
+# ── stock + recency (Sprint 3.9) ─────────────────────────────────────────────
+
+def _stock_filter_enabled() -> bool:
+    """Whether buscar_catalogo hides out-of-stock products. ON by default now
+    that ``stock`` is mirrored into bling_products (filter over the snapshot,
+    no live stock call). Toggle off with TOOLS_V2_FILTER_STOCK=false."""
+    try:
+        return bool(get_settings().tools_v2_filter_stock)
+    except Exception:  # noqa: BLE001 — never let config break the catalog tool
+        return True
+
+
+def _has_stock(product: dict[str, Any]) -> bool:
+    """True unless the product is POSITIVELY known to be out of stock.
+
+    ``stock`` is the mirrored on-hand balance. None/absent means "unknown"
+    (sync hasn't populated it yet, or a test fake without the field) and is
+    KEPT — we never hide a product on missing data. Only a parseable stock
+    that is <= 0 is dropped.
+    """
+    stock = product.get("stock")
+    if stock is None:
+        return True
+    try:
+        return int(stock) > 0
+    except (TypeError, ValueError):
+        return True
+
+
+def _created_at_key(product: dict[str, Any]) -> str:
+    """Recency sort key (newest first when sorted reverse=True). Falls back to
+    last_synced_at then ''. Empty when the field is absent (e.g. unit-test
+    fakes) → a stable no-op sort, never raises."""
+    return str(product.get("created_at") or product.get("last_synced_at") or "")
 
 
 # ── tools ────────────────────────────────────────────────────────────────────
@@ -343,6 +381,12 @@ async def buscar_catalogo(
     if not products:
         return json.dumps({"resultados": [], "aviso": "catalogo indisponivel"}, ensure_ascii=False)
 
+    # Sprint 3.9 — drop out-of-stock products up front (cheap: stock is mirrored
+    # into the snapshot). stock None/absent = unknown = kept; only positive 0 is
+    # dropped. Done before category/price/ranking so it never leaks downstream.
+    if _stock_filter_enabled():
+        products = [p for p in products if _has_stock(p)]
+
     # ── Category filter ───────────────────────────────────────────────────────
     # Explicit categoria param wins. Otherwise, a price/sort query defaults to
     # BEACH TENNIS rackets — this is a beach tennis/padel store, so a bare
@@ -412,15 +456,22 @@ async def buscar_catalogo(
             # baratas" (sort_by_price) keeps the true ascending head.
             if has_price_filter and not sort_by_price:
                 ranked = _spread_by_price(products, _PRICE_RANGE_TOP_N)
-            else:
+            elif sort_by_price:
+                # Explicit "as mais baratas" → keep the true cheapest-first head.
                 ranked = products[:_PRICE_RANGE_TOP_N]
+            else:
+                # Sprint 3.9 — bare category/racket browse (no price ask) →
+                # newest first, so the customer always sees the latest arrivals.
+                ranked = sorted(products, key=_created_at_key, reverse=True)[:_PRICE_RANGE_TOP_N]
     elif q_tokens:
         scored = [(p, _score_product(q_tokens, p)) for p in products]
         scored = [(p, s) for p, s in scored if s > 0]
-        scored.sort(key=lambda ps: ps[1], reverse=True)
+        # Sprint 3.9 — newest first breaks ties between equally-scored matches.
+        scored.sort(key=lambda ps: (ps[1], _created_at_key(ps[0])), reverse=True)
         ranked = [p for p, _ in scored[:5]]
     else:
-        ranked = products[:5]
+        # Sprint 3.9 — no name, no price/category intent → newest first.
+        ranked = sorted(products, key=_created_at_key, reverse=True)[:5]
 
     out = [
         {"id": str(p.get("id")), "nome": p.get("name"), "preco": _price_brl(p.get("price_cents"))}
@@ -532,8 +583,11 @@ async def consultar_estoque(produto_id: str) -> str:
 
 @tool
 async def buscar_conhecimento(consulta: str) -> str:
-    """Busca informações da loja que NÃO são de produto: horário, endereço, garantia,
-    formas de pagamento, como funciona a Consultoria e quem a conduz. Use para dúvidas institucionais."""
+    """Busca informações da loja que NÃO são de produto específico: horário, endereço,
+    garantia, formas de pagamento, como funciona a Consultoria, E TAMBÉM a referência
+    técnica de raquetes (o que é carbono, EVA e furação e como cada um muda o jogo).
+    Use para dúvidas institucionais e sempre que o cliente perguntar do que a raquete é
+    feita ou o que um termo técnico (EVA Soft, carbono 12k, número de furos) significa."""
     try:
         from app.rag.retriever import search_knowledge_base
         from app.storage.db import get_session

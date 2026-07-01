@@ -227,6 +227,66 @@ DOCUMENTS: list[dict] = [
             "basta informar o endereço brasileiro como destino de entrega durante o checkout."
         ),
     },
+
+    # ── Referência técnica de raquete (Sprint 3.9) ─────────────────────────────
+    {
+        "title": "Materiais da raquete: carbono, EVA e furação (o que muda no jogo)",
+        "category": "faq",
+        "content": (
+            "Na hora de comparar raquetes de beach tennis, três indicadores explicam "
+            "quase tudo: o carbono, o EVA e a furação. O segredo é sempre traduzir o "
+            "termo técnico no que ele muda na prática — muita raquete vem com nomes "
+            "comerciais (por exemplo 'EVA Soft', 'Spin Coating', 'Twin Tubular System', "
+            "'Silicone Grip Channel', 'Cork Cushion Grip'), mas para o cliente o que "
+            "importa é o efeito no jogo.\n\n"
+            "CARBONO (rigidez da face). A quantidade de carbono na face costuma ser "
+            "indicada de 1k a 24k. Quanto mais filamento de carbono, mais dura é a "
+            "raquete — uma face mais dura devolve a bola com mais potência e resposta; "
+            "com menos carbono ela é mais flexível e macia.\n\n"
+            "EVA (o miolo, do macio ao duro). O EVA é a espuma interna da raquete e "
+            "varia numa escala do mais macio ao mais duro. EVA Soft é o mais macio: dá "
+            "mais conforto e mais impulsão na bola, porém menos controle. EVA Tech é o "
+            "mais duro: dá mais controle e uma batida mais seca, porém menos velocidade. "
+            "EVA Pro fica no meio-termo, equilibrando conforto e controle. Algumas marcas "
+            "dão nomes próprios a variações dentro da família mais macia (por exemplo "
+            "'Double Black Soft', 'Super Soft'), mas a lógica é sempre a mesma escala: "
+            "quanto mais macio, mais conforto e impulsão; quanto mais duro, mais "
+            "controle.\n\n"
+            "FURAÇÃO (número de furos). O número de furos na face mexe mais na maciez da "
+            "raquete do que no atrito com o vento. Na prática: mais furos deixam a "
+            "raquete mais macia e elástica; menos furos deixam a raquete mais firme e "
+            "dura.\n\n"
+            "RESUMO PRÁTICO. Mais potência/impulsão e conforto: mais macio (menos "
+            "carbono, EVA Soft, mais furos). Mais controle e batida seca: mais duro "
+            "(mais carbono, EVA Tech, menos furos). EVA Pro e furação intermediária "
+            "equilibram os dois. Não existe 'a melhor' no vácuo — depende do jogo de "
+            "cada pessoa, e é isso que a Consultoria avalia em quadra."
+        ),
+    },
+
+    # ── Texto da Consultoria (Sprint 3.9 — verbatim) ───────────────────────────
+    {
+        "title": "Consultoria Base Sports",
+        "category": "store",
+        "content": (
+            "Consultoria Base Sports\n\n"
+            "Nao sabe qual raquete comprar? Evite Investir errado. A Base Sports te "
+            "direciona para a escolha certa, com base tecnica e teste pratico.\n\n"
+            "Como funciona:\n\n"
+            "1a Etapa - Diagnostico\n"
+            "Entendemos seu nivel, estilo de jogo e objetivos. Com base nisso, indicamos "
+            "as raquetes ideais para voce.\n\n"
+            "2a Etapa - Teste em quadra\n"
+            "Voce testa as raquetes com metodo pratico: Saque, Smash, Curtas, Lob, "
+            "Voleios.\n\n"
+            "Resultado: voce escolhe com seguranca a raquete que realmente encaixa no "
+            "seu jogo. A Sua escolha sensorial vence qualquer ficha técnica.\n\n"
+            "Investimento: R$ 350\n"
+            "Bonus: comprando a raquete conosco, a consultoria sai gratuita.\n\n"
+            "Resumo direto: Testar antes de comprar e o que evita perder R$2.000+ em uma "
+            "escolha errada."
+        ),
+    },
 ]
 
 

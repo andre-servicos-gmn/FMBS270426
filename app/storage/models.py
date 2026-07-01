@@ -118,6 +118,10 @@ class BlingProduct(Base):
     gtin: Mapped[str | None] = mapped_column(Text, nullable=True)
     situacao: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_raquete_praia: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    # Sprint 3.9 — on-hand stock mirrored from Bling by the sync. NULLABLE on
+    # purpose: NULL means "unknown" (sync hasn't populated it yet, or the stock
+    # read failed); the catalog filter keeps NULL and only hides a positive 0.
+    stock: Mapped[int | None] = mapped_column(Integer, nullable=True)
     campos_customizados: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     atributos_parseados: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     imagem_url: Mapped[str | None] = mapped_column(Text, nullable=True)

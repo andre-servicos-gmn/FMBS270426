@@ -49,6 +49,11 @@ def _row_to_dict(p: BlingProduct) -> dict[str, Any]:
         "atributos_parseados": p.atributos_parseados or {},
         "imagem_url": p.imagem_url,
         "situacao": p.situacao,
+        # Sprint 3.9 — surfaced for the catalog tool: ``stock`` drives the
+        # in-stock filter (None = unknown = kept), ``created_at`` drives the
+        # "newest first" ordering in buscar_catalogo.
+        "stock": p.stock,
+        "created_at": p.created_at,
         "external_id": str(p.id),
     }
 

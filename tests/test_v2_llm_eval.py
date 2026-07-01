@@ -36,14 +36,14 @@ requires_key = pytest.mark.skipif(
 _KRONOS = {
     "id": 16623454022, "name": "Raquete De Beach Tennis Ama Sport Kronos 6th Generation 2026",
     "marca": "Ama Sports", "modelo": "Kronos 2026", "price_cents": 299990,
-    "categoria_nome": "Raquetes de Praia", "weight_g": 300,
+    "categoria_nome": "Raquetes de Praia", "weight_g": 300, "is_raquete_praia": True,
     "description": "Raquete focada em controle e potência para jogo profissional.",
     "campos_customizados": {"Material": "Carbono 3K", "Espessura": "22mm"},
 }
 _PROTEO = {
     "id": 16652244726, "name": "Raquete Beach Tennis AMA PROTEO 2026 Azul",
     "marca": "Ama Sports", "modelo": "Proteo 2026", "price_cents": 289990,
-    "categoria_nome": "Raquetes de Praia", "weight_g": 320,
+    "categoria_nome": "Raquetes de Praia", "weight_g": 320, "is_raquete_praia": True,
     "description": "Raquete versátil, equilíbrio entre controle e potência, para todos os níveis.",
     "campos_customizados": {"Material": "Carbono 3K", "Espessura": "22mm"},
 }

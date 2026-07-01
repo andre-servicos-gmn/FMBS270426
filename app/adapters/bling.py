@@ -313,9 +313,14 @@ class BlingClient:
         return await self._request("GET", f"/produtos/{produto_id}")
 
     async def consultar_estoque(
-        self, produto_id: int, deposito_id: int | None = None
+        self, produto_id: int | list[int], deposito_id: int | None = None
     ) -> dict[str, Any]:
-        """GET /estoques/saldos — real-time stock balance."""
+        """GET /estoques/saldos — real-time stock balance.
+
+        ``produto_id`` accepts a single id or a list. httpx serializes a list
+        value as the repeated ``idsProdutos[]=a&idsProdutos[]=b`` Bling expects,
+        so the sync can fetch a whole page's stock in one call.
+        """
         params: dict[str, Any] = {"idsProdutos[]": produto_id}
         if deposito_id is not None:
             params["idsDepositos[]"] = deposito_id

@@ -441,6 +441,7 @@ def detail_to_row(
     *,
     category_map: dict[int, str] | None = None,
     field_map: dict[int, str] | None = None,
+    stock: int | None = None,
 ) -> dict[str, Any]:
     """Map a Bling /produtos/{id} response into our ``bling_products`` row.
 
@@ -451,6 +452,10 @@ def detail_to_row(
     ``field_map`` (id → nome) so we can resolve the ID-only stubs that
     Bling V3 actually returns. Both maps default to empty when omitted
     (preserving Sprint 2.5.1 backward-compat for tests).
+
+    Sprint 3.9 — ``stock`` is the on-hand balance mirrored into the row. It is
+    NOT in the product detail (Bling exposes stock on a separate endpoint), so
+    the caller resolves it and passes it in; None means "unknown".
     """
     if not isinstance(detail, dict):
         raise TypeError(f"detail_to_row expects dict, got {type(detail).__name__}")
@@ -516,6 +521,7 @@ def detail_to_row(
         "is_raquete_praia": is_raquete_de_praia(
             detail, custom, categoria_nome_resolved=categoria_nome,
         ),
+        "stock": stock,
         "campos_customizados": custom,
         "atributos_parseados": parsed,
         "imagem_url": _extract_first_image_link(detail),
@@ -533,6 +539,12 @@ def _wanted_categories() -> set[str]:
 
 
 # ── Sync API ────────────────────────────────────────────────────────────
+
+# Sentinel for ``sync_single_product(stock=...)``: distinguishes "caller did not
+# pass stock" (webhook path → fetch it for this id) from "caller passed None"
+# (full_sync batch path resolved it to unknown → store NULL, don't re-fetch).
+_STOCK_UNSET: Any = object()
+
 
 class BlingSync:
     def __init__(self, client: BlingClient | None = None) -> None:
@@ -581,13 +593,29 @@ class BlingSync:
 
         self._maps_loaded = True
 
-    async def sync_single_product(self, produto_id: int) -> str:
+    async def _fetch_stock(self, produto_id: int) -> int | None:
+        """Resolve the on-hand stock for a single product. Guarded — returns
+        None on any failure so the row is stored with "unknown" stock (kept by
+        the catalog filter, never hidden)."""
+        from app.sync.bling_stock import get_stocks_bulk
+
+        stocks = await get_stocks_bulk([produto_id], client=self._client)
+        return stocks.get(produto_id)
+
+    async def sync_single_product(
+        self, produto_id: int, *, stock: Any = _STOCK_UNSET
+    ) -> str:
         """Fetch one + UPSERT. Returns 'inserted' | 'updated' | 'skipped'.
 
         Sprint 2.5.1 — logs the raw Bling payload at DEBUG so investigations
         can re-trace shape variations without re-hitting the API. The
         product id is always included in failure logs so callers can
         cross-reference quickly.
+
+        Sprint 3.9 — when ``stock`` is not supplied (webhook path), it is
+        fetched for this id and mirrored into the row. ``full_sync`` resolves
+        stock in one batched call per page and passes it in (possibly None), so
+        no extra per-product stock call happens there.
         """
         detail_resp = await self._client.consultar_produto(produto_id)
         if logger.isEnabledFor(logging.DEBUG):
@@ -606,11 +634,14 @@ class BlingSync:
             return "skipped"
 
         await self._ensure_maps()
+        if stock is _STOCK_UNSET:
+            stock = await self._fetch_stock(produto_id)
         try:
             row = detail_to_row(
                 detail,
                 category_map=self._category_map,
                 field_map=self._field_map,
+                stock=stock,
             )
         except Exception as exc:
             logger.error(
@@ -647,6 +678,16 @@ class BlingSync:
                 if not items:
                     break
 
+                # Sprint 3.9 — resolve stock for the whole page in ONE batched
+                # /estoques/saldos call, then mirror each saldo into its row.
+                # Guarded (get_stocks_bulk returns {} on failure) so a stock
+                # blip never aborts the catalog sync — those rows just get
+                # saldo=None ("unknown", kept by the catalog filter).
+                from app.sync.bling_stock import get_stocks_bulk
+
+                page_ids = [int(i["id"]) for i in items if i.get("id") is not None]
+                stock_map = await get_stocks_bulk(page_ids, client=self._client)
+
                 for item in items:
                     stats["total_processed"] += 1
                     # The list endpoint returns a shallow product; we always
@@ -657,7 +698,9 @@ class BlingSync:
                         stats["skipped"] += 1
                         continue
                     try:
-                        outcome = await self.sync_single_product(produto_id)
+                        outcome = await self.sync_single_product(
+                            produto_id, stock=stock_map.get(produto_id)
+                        )
                         if outcome == "inserted":
                             stats["inserted"] += 1
                         elif outcome == "updated":

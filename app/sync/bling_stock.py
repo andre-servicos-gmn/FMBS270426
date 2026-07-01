@@ -88,6 +88,38 @@ async def get_stock(produto_id: int) -> int | None:
         await redis.aclose()
 
 
+async def get_stocks_bulk(
+    produto_ids: list[int], client: Any | None = None
+) -> dict[int, int | None]:
+    """Fetch on-hand balances for many products in ONE /estoques/saldos call.
+
+    Used by the catalog sync to mirror ``saldo`` into ``bling_products`` without
+    paying a stock call per product. Returns ``{produto_id: saldo or None}`` —
+    a product missing from the Bling response (or any failure) maps to None,
+    i.e. "unknown", which the catalog filter keeps rather than hides.
+
+    Bypasses the Redis cache on purpose (this is a sync-time bulk read, not the
+    per-turn ``get_stock`` path). Fully guarded: any error returns ``{}``.
+    """
+    if not produto_ids:
+        return {}
+    own = client
+    if own is None:
+        from app.adapters.bling import BlingClient
+        own = BlingClient()
+    try:
+        payload = await own.consultar_estoque(produto_ids)
+    except Exception as exc:  # noqa: BLE001 — degrade to "unknown" for all
+        logger.warning("bling_stock bulk_failed n=%d: %s", len(produto_ids), exc)
+        return {}
+    result = {pid: _extract_saldo(payload, pid) for pid in produto_ids}
+    logger.info(
+        "bling_stock bulk_fetched requested=%d resolved=%d",
+        len(produto_ids), sum(1 for v in result.values() if v is not None),
+    )
+    return result
+
+
 async def invalidate_stock(produto_id: int) -> None:
     """Drop the cached entry — called when the webhook signals an update."""
     redis = _get_redis()

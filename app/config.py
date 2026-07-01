@@ -129,6 +129,13 @@ class Settings(BaseSettings):
     # em dev/staging para smoke test do loop (tools ainda são stubs). Lê de USE_V2.
     use_v2: bool = Field(default=False)
 
+    # Sprint 3.9 — buscar_catalogo só mostra produtos com estoque (stock > 0).
+    # ON por default agora que o stock é espelhado em bling_products (filtro em
+    # cima do snapshot, sem custo de API). Kill-switch via TOOLS_V2_FILTER_STOCK:
+    # com False o agente volta a mostrar tudo (útil se o stock do sync estiver
+    # zerado/errado). stock NULL = desconhecido = sempre mantido.
+    tools_v2_filter_stock: bool = Field(default=True)
+
     # App
     app_env: Literal["development", "staging", "production"] = Field(default="development")
     log_level: str = Field(default="INFO")

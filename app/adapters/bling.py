@@ -45,6 +45,20 @@ _TOKEN_REFRESH_LEEWAY = timedelta(seconds=60)
 _MAX_REQUEST_RETRIES = 4
 _BACKOFF_BASE_S = 1.0
 
+# Sprint 2.7.7 — process-wide single-flight lock around the OAuth refresh.
+# Bling V3 ROTATES the refresh_token on every grant: each refresh returns a
+# brand-new refresh_token and invalidates the one we sent. Without a lock,
+# concurrent callers (webhook + stock lookup + daily sync, all in this one
+# process) each read the same stored token and refresh in parallel; the loser
+# sends an already-invalidated token and can clobber the DB with a token Bling
+# no longer honours — breaking auth until a manual re-authorize. The lock
+# serializes refreshes; after acquiring it we re-check whether another
+# coroutine already produced a fresh token and skip the redundant call.
+# Module-level (not instance-level) because BlingClient is instantiated fresh
+# at every call site. Single easypanel replica → in-process lock suffices; a
+# multi-replica deploy would need a Redis lock instead (see DEPLOY.md).
+_refresh_lock = asyncio.Lock()
+
 
 class BlingError(Exception):
     """Base class for Bling API errors."""
@@ -196,6 +210,48 @@ class BlingClient:
                 existing.updated_at = _now()
             await session.commit()
 
+    async def _refresh_single_flight(
+        self, *, stale_access_token: str | None = None, force: bool = False
+    ) -> BlingCredentials:
+        """Serialize ``refresh_access_token`` so concurrent callers don't race
+        the rotating Bling refresh_token into an invalid state.
+
+        After acquiring ``_refresh_lock`` we re-load the credentials and decide
+        whether a refresh is still needed:
+
+        - ``stale_access_token`` set and the stored access_token already differs
+          → another coroutine refreshed while we waited → return the fresh row,
+          no second refresh.
+        - ``force=False`` and the token is still comfortably valid → another
+          coroutine refreshed (or our pre-lock read was stale) → skip.
+        - otherwise → perform the refresh.
+
+        ``force=True`` is used by the reactive 401 path: Bling rejected the
+        token even though our clock thought it was valid, so we refresh anyway
+        (unless someone else already rotated it, per the stale-token check).
+        """
+        async with _refresh_lock:
+            current = await self._load_credentials()
+            if current is None:
+                raise BlingNotAuthorizedError("no credentials row to refresh")
+
+            if stale_access_token is not None and current.access_token != stale_access_token:
+                logger.info("bling_refresh_skipped — another coroutine already refreshed")
+                return current
+
+            if not force:
+                expires = current.expires_at
+                if expires.tzinfo is None:
+                    expires = expires.replace(tzinfo=timezone.utc)
+                if expires - _TOKEN_REFRESH_LEEWAY > _now():
+                    logger.info("bling_refresh_skipped — token already fresh")
+                    return current
+
+            await self.refresh_access_token()
+            refreshed = await self._load_credentials()
+            assert refreshed is not None
+            return refreshed
+
     async def ensure_authorized(self) -> BlingCredentials:
         """Load credentials, refreshing if expired. Raise if not authorized."""
         creds = await self._load_credentials()
@@ -208,10 +264,7 @@ class BlingClient:
             expires = expires.replace(tzinfo=timezone.utc)
         if expires - _TOKEN_REFRESH_LEEWAY <= _now():
             logger.info("bling_token_expired_or_near_expiry — refreshing")
-            await self.refresh_access_token()
-            refreshed = await self._load_credentials()
-            assert refreshed is not None
-            return refreshed
+            return await self._refresh_single_flight(stale_access_token=creds.access_token)
         return creds
 
     # ── Authenticated request with auto-refresh + 429 backoff ──────────
@@ -241,11 +294,13 @@ class BlingClient:
                 )
 
             if resp.status_code == 401:
-                # Token may have just expired — refresh once.
+                # Token may have just expired — refresh once (single-flight, so
+                # a concurrent burst of 401s triggers at most one refresh).
                 if attempt == 0:
                     logger.info("bling_request_401 — refreshing token and retrying")
-                    await self.refresh_access_token()
-                    creds = await self.ensure_authorized()
+                    creds = await self._refresh_single_flight(
+                        stale_access_token=creds.access_token, force=True
+                    )
                     continue
                 logger.error("bling_request_401_after_refresh path=%s", path)
                 raise BlingError(f"Unauthorized after refresh: {path}")

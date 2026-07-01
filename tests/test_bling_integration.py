@@ -184,6 +184,47 @@ async def test_refresh_raises_when_no_credentials(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_concurrent_refresh_is_single_flight(monkeypatch):
+    """Sprint 2.7.7 — a burst of concurrent callers hitting an expired token
+    must trigger exactly ONE refresh. Without the single-flight lock each
+    coroutine would spend the same rotating refresh_token in parallel and
+    break Bling auth."""
+    monkeypatch.setenv("BLING_CLIENT_ID", "cid")
+    monkeypatch.setenv("BLING_CLIENT_SECRET", "s")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    expired = _fake_creds_row(expires_at=datetime.now(timezone.utc) - timedelta(minutes=5))
+    expired.access_token = "OLD"
+    fresh = _fake_creds_row(expires_at=datetime.now(timezone.utc) + timedelta(hours=6))
+    fresh.access_token = "NEW"
+
+    state = {"refreshed": False}
+
+    async def fake_load():
+        return fresh if state["refreshed"] else expired
+
+    async def fake_refresh():
+        await asyncio.sleep(0.01)  # simulate Bling rotation latency
+        state["refreshed"] = True
+
+    with patch(
+        "app.adapters.bling.BlingClient._load_credentials",
+        new=AsyncMock(side_effect=fake_load),
+    ):
+        with patch(
+            "app.adapters.bling.BlingClient.refresh_access_token",
+            new=AsyncMock(side_effect=fake_refresh),
+        ) as refresh:
+            results = await asyncio.gather(
+                *[BlingClient().ensure_authorized() for _ in range(5)]
+            )
+
+    refresh.assert_awaited_once()
+    assert all(r.access_token == "NEW" for r in results)
+
+
+@pytest.mark.asyncio
 async def test_request_auto_refresh_on_401(monkeypatch):
     monkeypatch.setenv("BLING_CLIENT_ID", "cid")
     monkeypatch.setenv("BLING_CLIENT_SECRET", "s")
@@ -199,11 +240,18 @@ async def test_request_auto_refresh_on_401(monkeypatch):
             new_callable=AsyncMock,
             return_value=_fake_creds_row(),
         ):
+            # The single-flight refresh re-reads credentials after acquiring
+            # the lock, so _load_credentials must be mocked too.
             with patch(
-                "app.adapters.bling.BlingClient.refresh_access_token",
+                "app.adapters.bling.BlingClient._load_credentials",
                 new_callable=AsyncMock,
-            ) as refresh:
-                data = await BlingClient()._request("GET", "/produtos")
+                return_value=_fake_creds_row(),
+            ):
+                with patch(
+                    "app.adapters.bling.BlingClient.refresh_access_token",
+                    new_callable=AsyncMock,
+                ) as refresh:
+                    data = await BlingClient()._request("GET", "/produtos")
     refresh.assert_awaited_once()
     assert data["data"][0]["id"] == 1
 

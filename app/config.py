@@ -143,6 +143,21 @@ class Settings(BaseSettings):
     audio_rate_limit_per_hour: int = Field(default=10)
     audio_transcript_cache_ttl: int = Field(default=86400)
 
+    # Sprint 3.11 — racket identification from customer photos (GPT-4o vision).
+    # openai_vision_model: model used for the identification call only (the
+    #   chat flow stays on ``openai_model``).
+    # image_max_bytes: post-download cap — WhatsApp compresses images to a few
+    #   hundred KB; anything above this is a forwarded original / abuse.
+    # image_rate_limit_per_hour: max photos per phone_hash per hour (fixed
+    #   window, same policy as audio). 0 disables the limit.
+    # image_id_cache_ttl: seconds to keep an identification result cached by
+    #   the SHA-256 of the image bytes, so an identical photo re-sent never
+    #   pays the vision call twice.
+    openai_vision_model: str = Field(default="gpt-4o")
+    image_max_bytes: int = Field(default=10_000_000)
+    image_rate_limit_per_hour: int = Field(default=10)
+    image_id_cache_ttl: int = Field(default=86400)
+
     # Sprint 3.9 — buscar_catalogo só mostra produtos com estoque (stock > 0).
     # ON por default agora que o stock é espelhado em bling_products (filtro em
     # cima do snapshot, sem custo de API). Kill-switch via TOOLS_V2_FILTER_STOCK:

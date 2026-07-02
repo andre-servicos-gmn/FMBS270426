@@ -256,16 +256,24 @@ async def test_transcribe_audio_empty_triggers_fallback_at_webhook(override_toke
 
 
 @pytest.mark.asyncio
-async def test_webhook_image_returns_canned_response(override_token, fake_redis):
-    """Image payload → canned 'still can't analyse photos' reply, graph NOT invoked."""
+async def test_webhook_image_not_racket_returns_canned_response(override_token, fake_redis):
+    """Sprint 3.11 — image without a racket → canned 'não identifiquei raquete'
+    reply, graph NOT invoked. (The full vision flow lives in
+    tests/test_image_identification.py.)"""
     mock_graph = AsyncMock()
 
     with (
         patch("app.api.webhook._get_graph", return_value=mock_graph),
         patch("app.api.webhook.EvolutionClient") as MockEvo,
+        patch(
+            "app.api.webhook.identify_racket_image",
+            new_callable=AsyncMock,
+            return_value={"is_racket": False, "brand": None, "model": None, "confidence": None},
+        ),
         patch("app.storage.redis_session._get_redis_client", return_value=fake_redis),
     ):
         evo_instance = AsyncMock()
+        evo_instance.get_media_base64 = AsyncMock(return_value=(b"jpeg-bytes", "image/jpeg"))
         evo_instance.send_text = AsyncMock()
         MockEvo.return_value = evo_instance
 
@@ -280,7 +288,7 @@ async def test_webhook_image_returns_canned_response(override_token, fake_redis)
     assert resp.json()["kind"] == "image"
     evo_instance.send_text.assert_called_once()
     msg = evo_instance.send_text.call_args.args[1]
-    assert "imagem" in msg.lower()
+    assert "raquete" in msg.lower()
     mock_graph.ainvoke.assert_not_called()
 
 

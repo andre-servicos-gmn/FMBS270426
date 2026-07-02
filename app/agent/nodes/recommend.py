@@ -71,7 +71,7 @@ async def _list_catalog_candidates(last_text: str) -> list[dict[str, Any]]:
         return []
 
 
-def _confirmation_text(matched: dict[str, Any]) -> str:
+def _confirmation_text(matched: dict[str, Any], from_image: bool = False) -> str:
     """Sprint 2.6.1 / 2.6.4 — consultive tone, neutral noun.
 
     The 2.6.1 closing kept "ou já quer fechar?" out (purchase vocabulary
@@ -79,28 +79,46 @@ def _confirmation_text(matched: dict[str, Any]) -> str:
     "raquete" hard-coded fallback name with a neutral one so a customer
     asking about a non-racket product (sock, manguito, kit, etc.) doesn't
     see "Sim, temos a essa raquete!".
+
+    Sprint 3.11 — ``from_image`` switches to photo-aware wording. The
+    closing question is kept IDENTICAL so the ``awaiting_detail_choice``
+    follow-up contract (triage short-circuit) is unchanged.
     """
     name = matched.get("name", "esse produto")
+    if from_image:
+        return (
+            f"Pela foto, essa é a *{name}* — e temos ela aqui! Posso te "
+            f"passar mais detalhes, ou prefere ver pessoalmente na loja?"
+        )
     return (
         f"Sim, temos a *{name}*! Posso te passar mais detalhes, ou "
         f"prefere ver pessoalmente na loja?"
     )
 
 
-def _not_found_text(query: str) -> str:
+def _not_found_text(query: str, from_image: bool = False) -> str:
     """Sprint 2.6.2 / 2.6.4 — neutral "not found" wording.
 
     Replaces "essa raquete" → "esse produto" so the line works for socks,
     manguitos, kits, etc. — the agent doesn't blow its cover when the
     customer asked about non-racket items.
+
+    Sprint 3.11 — photo variant still confirms what was identified (the
+    customer wants to know the agent SAW the racket) before saying it's
+    not in the catalog.
     """
+    if from_image and query.strip():
+        return (
+            f"Pela foto, parece ser a *{query.strip()}* — mas não encontrei "
+            "ela no nosso catálogo. Quer que eu te ajude a achar uma parecida?"
+        )
     return (
         "Hmm, não encontrei esse produto no nosso catálogo. "
         "Quer que eu te ajude a achar outro?"
     )
 
 
-def _ambiguous_text(candidates: list[dict[str, Any]]) -> str:
+def _ambiguous_text(candidates: list[dict[str, Any]], from_image: bool = False) -> str:
     """Sprint 2.6.4 — render the ambiguous-list confirmation.
 
     Up to 3 candidates listed by bold name. The closing question is kept
@@ -111,25 +129,36 @@ def _ambiguous_text(candidates: list[dict[str, Any]]) -> str:
     names = [c.get("name", "") for c in candidates[:3] if c.get("name")]
     if len(names) >= 2:
         bulleted = "\n".join(f"• *{n}*" for n in names)
+        header = (
+            "Pela foto, pode ser uma dessas:" if from_image
+            else "Temos algumas opções parecidas:"
+        )
         return (
-            "Temos algumas opções parecidas:\n"
+            f"{header}\n"
             f"{bulleted}\n"
             "\n"
             "Qual você procura?"
         )
     if names:
+        if from_image:
+            return f"Pela foto, parece ser a *{names[0]}* — é essa?"
         return f"Você quis dizer a *{names[0]}*?"
-    return _not_found_text("")
+    return _not_found_text("", from_image)
 
 
-def _fallback_top3_text(candidates: list[dict[str, Any]]) -> str:
+def _fallback_top3_text(candidates: list[dict[str, Any]], from_image: bool = False) -> str:
     """Sprint 2.6.4 — when match returns ``none`` but the top candidates
     share at least one distinctive token with the query, offer them as a
     soft fallback instead of just "não encontrei"."""
     names = [c.get("name", "") for c in candidates[:3] if c.get("name")]
     bulleted = "\n".join(f"• *{n}*" for n in names)
+    header = (
+        "Não encontrei exatamente essa da foto, mas tenho modelos parecidos:"
+        if from_image
+        else "Não encontrei exatamente isso, mas tenho modelos parecidos:"
+    )
     return (
-        "Não encontrei exatamente isso, mas tenho modelos parecidos:\n"
+        f"{header}\n"
         f"{bulleted}\n"
         "\n"
         "Algum desses é o que você procura?"
@@ -161,6 +190,12 @@ async def recommend_node(state: AgentState) -> dict:
         last_human.content if last_human and isinstance(last_human.content, str) else ""
     )
 
+    # Sprint 3.11 — the current message is a synthetic "brand model" query
+    # built from a racket photo (see webhook _handle_image_message). Use
+    # photo-aware wording and consume the flag in every exit path so the
+    # next text turn phrases normally.
+    from_image = bool(state.get("image_product_query"))
+
     # Anti-rerun guard — guards against the customer repeating the same
     # short follow-up within 60s.
     if should_block_rerun(state, "recommend", last_text):
@@ -172,6 +207,7 @@ async def recommend_node(state: AgentState) -> dict:
         return {
             "messages": [AIMessage(content=fallback)],
             "response_blocks": [fallback],
+            "image_product_query": False,
             **stamp_node_execution("recommend"),
         }
 
@@ -201,6 +237,7 @@ async def recommend_node(state: AgentState) -> dict:
             "awaiting_detail_choice": True,
             # Sprint 2.7.1 — leaving the ambiguous-list mode.
             "awaiting_candidate_choice": False,
+            "image_product_query": False,
             **stamp_node_execution("recommend"),
         }
 
@@ -215,7 +252,7 @@ async def recommend_node(state: AgentState) -> dict:
         # ("kit bolinhas" → "Bola Beach Tennis ... Com 72 Bolinhas").
         top3 = (match.candidates if match else None) or []
         if top3 and _candidates_share_tokens_with_query(last_text, top3):
-            text = _fallback_top3_text(top3)
+            text = _fallback_top3_text(top3, from_image)
             logger.info(
                 "recommend not_matched_with_fallback query=%r n_candidates=%d",
                 last_text[:80], len(top3),
@@ -229,24 +266,26 @@ async def recommend_node(state: AgentState) -> dict:
                 # desses é o que você procura?" — same UX as ambiguous.
                 # Triage uses this flag to short-circuit "primeira"/"2026".
                 "awaiting_candidate_choice": True,
+                "image_product_query": False,
                 **stamp_node_execution("recommend"),
             }
 
-        text = _not_found_text(last_text)
-        logger.info("recommend not_matched query=%r", last_text[:80])
+        text = _not_found_text(last_text, from_image)
+        logger.info("recommend not_matched query=%r from_image=%s", last_text[:80], from_image)
         return {
             "messages": [AIMessage(content=text)],
             "response_blocks": [text],
             "recommended_products": [],
             "last_product_candidates": None,
             "awaiting_candidate_choice": False,
+            "image_product_query": False,
             **stamp_node_execution("recommend"),
         }
 
     if match.status in ("exact", "fuzzy_high"):
         matched = match.product
         assert matched is not None  # status guarantees product is set
-        text = _confirmation_text(matched)
+        text = _confirmation_text(matched, from_image)
         logger.info(
             "recommend matched product=%s status=%s "
             "awaiting_detail_choice=True",
@@ -263,6 +302,7 @@ async def recommend_node(state: AgentState) -> dict:
             "awaiting_detail_choice": True,
             # Sprint 2.7.1 — single match → leaving ambiguous-list mode.
             "awaiting_candidate_choice": False,
+            "image_product_query": False,
             **stamp_node_execution("recommend"),
         }
 
@@ -270,7 +310,10 @@ async def recommend_node(state: AgentState) -> dict:
         candidate = match.product
         assert candidate is not None
         name = candidate.get("name", "esse produto")
-        text = f"Você quis dizer a *{name}*?"
+        text = (
+            f"Pela foto, parece ser a *{name}* — é essa?" if from_image
+            else f"Você quis dizer a *{name}*?"
+        )
         logger.info(
             "recommend confirmation_pending candidate=%s distance=%s",
             name, match.distance,
@@ -282,12 +325,13 @@ async def recommend_node(state: AgentState) -> dict:
             # Sprint 2.7.1 — "Você quis dizer X?" is its own confirmation
             # mode; not a candidate list. Clear the ambiguous-list flag.
             "awaiting_candidate_choice": False,
+            "image_product_query": False,
             **stamp_node_execution("recommend"),
         }
 
     if match.status == "ambiguous":
         candidates = list(match.candidates or [])
-        text = _ambiguous_text(candidates)
+        text = _ambiguous_text(candidates, from_image)
         logger.info(
             "recommend ambiguous n_candidates=%d awaiting_candidate_choice=True",
             len(candidates),
@@ -302,16 +346,18 @@ async def recommend_node(state: AgentState) -> dict:
             # so "primeira" / "2026" / "Hugo Russo" get resolved without the
             # LLM having to guess.
             "awaiting_candidate_choice": True,
+            "image_product_query": False,
             **stamp_node_execution("recommend"),
         }
 
     # Defensive — unknown status falls through to "not found".
-    text = _not_found_text(last_text)
+    text = _not_found_text(last_text, from_image)
     return {
         "messages": [AIMessage(content=text)],
         "response_blocks": [text],
         "recommended_products": [],
         "last_product_candidates": None,
         "awaiting_candidate_choice": False,
+        "image_product_query": False,
         **stamp_node_execution("recommend"),
     }

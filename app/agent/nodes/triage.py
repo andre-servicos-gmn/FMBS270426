@@ -353,6 +353,16 @@ async def triage_node(state: AgentState) -> dict:
         else str(last_human.content)
     )
 
+    # ── Sprint 3.11 — photo product query short-circuit ───────────────────
+    # The webhook set ``image_product_query`` because the current message
+    # is a synthetic "brand model" query built from a racket photo the
+    # vision model identified. There is nothing to classify — this IS a
+    # product inquiry. Route straight to recommend; the flag survives so
+    # recommend can use photo-aware wording (it clears it afterwards).
+    if state.get("image_product_query"):
+        logger.info("triage image_product_query → product_inquiry (no LLM)")
+        return {"intent": "product_inquiry"}
+
     # ── Sprint 2.6.4 — multi-product reference short-circuit ──────────────
     # When the previous turn left ``last_product_candidates`` set (recommend
     # was ambiguous) AND the customer references the whole group ("as duas",

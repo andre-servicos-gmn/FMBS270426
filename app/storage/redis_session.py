@@ -179,3 +179,48 @@ async def get_cached_transcript(audio_sha256: str) -> str | None:
 async def cache_transcript(audio_sha256: str, text: str, ttl: int = 86400) -> None:
     """Store a transcript keyed by the SHA-256 of the audio bytes."""
     await _get_redis_client().setex(f"{_AUDIO_TRANSCRIPT_PREFIX}:{audio_sha256}", ttl, text)
+
+
+# ── Sprint 3.11 — image identification primitives ─────────────────────────────
+
+_IMAGE_RATE_PREFIX = "image_rate"
+_IMAGE_ID_PREFIX = "image_id"
+
+
+async def count_image_message(phone_hash: str, window_seconds: int = 3600) -> int:
+    """Increment this customer's image counter and return the new total.
+
+    Same fixed-window policy as ``count_audio_message``. Redis errors
+    propagate — the caller decides the fail-open policy.
+    """
+    key = f"{_IMAGE_RATE_PREFIX}:{phone_hash}"
+    client = _get_redis_client()
+    count = await client.incr(key)
+    if count == 1:
+        await client.expire(key, window_seconds)
+    return int(count)
+
+
+async def get_cached_image_id(image_sha256: str) -> dict | None:
+    """Return the cached identification dict for this image hash, or None.
+
+    A cached negative result ("not a racket") is VALID and is returned as-is
+    — distinct from None (cache miss).
+    """
+    raw = await _get_redis_client().get(f"{_IMAGE_ID_PREFIX}:{image_sha256}")
+    if raw is None:
+        return None
+    text = raw.decode() if isinstance(raw, bytes) else str(raw)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        logger.warning("image_id_cache_corrupt sha=%.12s — treating as miss", image_sha256)
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+async def cache_image_id(image_sha256: str, identification: dict, ttl: int = 86400) -> None:
+    """Store an identification dict keyed by the SHA-256 of the image bytes."""
+    await _get_redis_client().setex(
+        f"{_IMAGE_ID_PREFIX}:{image_sha256}", ttl, json.dumps(identification)
+    )

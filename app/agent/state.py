@@ -151,3 +151,13 @@ class AgentState(TypedDict):
     # CRITICAL: declared in the TypedDict (lesson 2.6.10) so the
     # checkpointer doesn't silently drop it between turns.
     price_range_mentioned: NotRequired[bool]
+    # Sprint 3.11 — set by the webhook when the current HumanMessage is a
+    # synthetic product query built from a racket PHOTO the customer sent
+    # (vision identified brand+model). Triage short-circuits it to
+    # product_inquiry (no LLM) and recommend uses photo-aware wording
+    # ("Pela foto, essa é a *X*!"). Consumed by recommend (set back to
+    # False) so a follow-up text turn phrases normally.
+    #
+    # CRITICAL: declared in the TypedDict (lesson 2.6.10) so the
+    # checkpointer doesn't silently drop it between turns.
+    image_product_query: NotRequired[bool]

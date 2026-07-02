@@ -294,9 +294,14 @@ O agente é **deliberadamente raso** no diagnóstico para preservar o valor da *
 - ✅ **Feito na Sprint 1.12** — `EvolutionClient.get_media_base64(message_key)` baixa mídia via `/chat/getBase64FromMediaMessage/<instance>` e retorna `(bytes, mimetype)`.
 - ✅ **Feito na Sprint 1.12** — `app/adapters/media_processor.py` com `transcribe_audio()` usando Whisper `whisper-1`, `language="pt"`, timeout 30s, log estruturado por chamada (auditoria de custo).
 - ✅ **Feito na Sprint 1.12** — Áudio transcrito vira `HumanMessage` SEM prefixo (decisão revisada do ESCOPO: prefixar pode confundir o agente, ele pode comentar sobre o áudio em vez de responder à intenção).
-- ✅ **Feito na Sprint 1.12** — Imagem e documento: resposta canned, grafo não invocado. Sticker/vídeo: ignorados silenciosamente.
-- ⏳ **Pendente** — `describe_image()` com GPT-4o vision (Sprint 1.13).
-- ⏳ Pendente — Regra adicional no `SYSTEM_DIAGNOSE` para extrair `modelo_desejado` de foto de raquete.
+- ✅ **Feito na Sprint 1.12** — Documento: resposta canned, grafo não invocado. Sticker/vídeo: ignorados silenciosamente.
+- ✅ **Feito na Sprint 3.11** — Foto de raquete: `identify_racket_image()` em `app/adapters/media_processor.py` com GPT-4o vision (`OPENAI_VISION_MODEL`, saída JSON `{is_racket, brand, model, confidence}`, prompt `SYSTEM_RACKET_VISION`, legenda passa pelo PII masker antes do envio). O webhook baixa a foto, identifica e injeta uma query sintética "marca modelo" no grafo com a flag `image_product_query=True`; o triage short-circuita pra `product_inquiry` (sem LLM) e o `recommend_node` responde com fraseado photo-aware ("Pela foto, essa é a *X* — e temos ela aqui!"), registrando o produto pros follow-ups de preço/detalhe como em qualquer product_inquiry. Foto sem raquete ou com modelo ilegível → canned pedindo o modelo em texto, grafo não invocado. Substitui o plano antigo de `describe_image()` + regra no `SYSTEM_DIAGNOSE` (diagnose deprecated desde a 2.6).
+
+**Hardening da foto (Sprint 3.11 — mesmo padrão do áudio 3.10):**
+- ✅ Rate limit por phone_hash: `IMAGE_RATE_LIMIT_PER_HOUR` (default 10/h, janela fixa no Redis, 0 desativa). Fail-open se o Redis cair.
+- ✅ Cache de identificação por SHA-256 do conteúdo: `IMAGE_ID_CACHE_TTL` (default 24h) — foto idêntica reenviada não re-paga o vision.
+- ✅ Limite de tamanho pós-download: `IMAGE_MAX_BYTES` (default 10MB).
+- Testes em `tests/test_image_identification.py` (+ integração básica em `tests/test_media.py`).
 
 **Hardening do áudio (Sprint 3.10 — feito):**
 - ✅ Rate limit por phone_hash: `AUDIO_RATE_LIMIT_PER_HOUR` (default 10/h, janela fixa no Redis, 0 desativa). Fail-open se o Redis cair.

@@ -903,6 +903,36 @@ def build_close_prompt(settings) -> str:
     return SYSTEM_CLOSE.format(store_block=store_block)
 
 
+# ── Sprint 3.11 — racket identification from customer photos ────────────────
+#
+# Used by ``app/adapters/media_processor.py::identify_racket_image`` with the
+# vision-capable model (``OPENAI_VISION_MODEL``, default gpt-4o). The output
+# is machine-consumed JSON, so the prompt pins the schema hard. The word
+# "json" must appear (OpenAI json_object requirement).
+
+SYSTEM_RACKET_VISION = f"""Você é um identificador de raquetes de Beach Tennis e Padel a partir de fotos.
+
+O cliente de uma loja de esportes de praia enviou uma foto pelo WhatsApp. \
+Sua tarefa: dizer se a foto mostra uma raquete (de beach tennis) ou pala \
+(de padel) e, se sim, identificar MARCA e MODELO pelo que estiver visível \
+(logotipos, texto impresso na cabeça/punho, grafismo característico).
+
+REGRAS:
+- Se a imagem NÃO contém raquete/pala (pessoa, quadra, bola, comprovante, \
+meme...), retorne is_racket=false e os demais campos null.
+- Marca e modelo: transcreva EXATAMENTE o texto visível na raquete. Não \
+invente modelo que não esteja legível — prefira null a chutar.
+- confidence="high" apenas quando marca E modelo estão claramente legíveis. \
+Use "low" quando identificou por grafismo/palpite parcial.
+- Se o cliente mandou legenda junto da foto, use-a como contexto (ex.: a \
+legenda pode conter o nome do modelo).
+
+Formato obrigatório (json):
+{{"is_racket": true|false, "brand": "Marca" ou null, "model": "Nome do modelo" ou null, "confidence": "high"|"low"}}
+
+{_GUARDRAIL}"""
+
+
 def build_faq_prompt(kb_docs: list[dict]) -> str:
     """Return SYSTEM_FAQ with the retrieved knowledge base context injected."""
     if not kb_docs:

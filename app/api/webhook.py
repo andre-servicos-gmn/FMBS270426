@@ -13,7 +13,7 @@ from redis.exceptions import RedisError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from app.adapters.evolution import EvolutionClient
-from app.adapters.media_processor import transcribe_audio
+from app.adapters.media_processor import identify_racket_image, transcribe_audio
 from app.agent.graph import build_graph
 from app.agent.message_splitter import parse_messages
 from app.agent.reset import (
@@ -26,17 +26,39 @@ from app.config import get_settings
 from app.security.audit_log import log_access
 from app.security.pii_masker import hash_phone, mask_pii
 from app.storage.redis_session import (
+    cache_image_id,
     cache_transcript,
     count_audio_message,
+    count_image_message,
+    get_cached_image_id,
     get_cached_transcript,
     is_message_processed,
     mark_message_processed,
 )
 
 # Canned responses for unsupported / partially supported media kinds.
-_IMAGE_RESPONSE = (
-    "Vi que você mandou uma imagem. Por aqui ainda não consigo analisar fotos, "
-    "mas se você me contar em texto qual modelo te interessa, eu te ajudo a buscar!"
+# Sprint 3.11 — photos of rackets ARE supported now (vision identification);
+# the canned replies below cover the failure/edge branches of that flow.
+_IMAGE_NOT_RACKET_RESPONSE = (
+    "Recebi sua foto! Mas não consegui identificar uma raquete nela. "
+    "Se você me disser em texto qual modelo te interessa, eu te ajudo a buscar!"
+)
+_IMAGE_UNIDENTIFIED_RESPONSE = (
+    "Vi que é uma raquete, mas não consegui identificar o modelo pela foto. "
+    "Sabe me dizer a marca ou o nome dela? Aí eu vejo aqui pra você!"
+)
+_IMAGE_FAILURE_RESPONSE = (
+    "Tive um problema pra processar sua foto. Pode me dizer em texto qual "
+    "modelo te interessa que eu te ajudo!"
+)
+_IMAGE_TOO_BIG_RESPONSE = (
+    "Essa imagem ficou um pouco pesada pra eu processar por aqui. Consegue "
+    "mandar como foto normal (sem ser em alta resolução) ou me dizer o "
+    "modelo em texto?"
+)
+_IMAGE_RATE_LIMIT_RESPONSE = (
+    "Recebi várias fotos suas em pouco tempo. Pra eu conseguir te ajudar "
+    "melhor agora, me diz por texto qual modelo você procura?"
 )
 _DOCUMENT_RESPONSE = (
     "Ainda não consigo abrir documentos por aqui. Se quiser, manda como foto "
@@ -457,10 +479,24 @@ async def webhook_whatsapp(
         logger.info("webhook_ignored_unknown phone_hash=%.8s", phone_hash)
         return {"status": "ignored", "reason": "unknown_message_type"}
 
-    # TODO Sprint 1.13: vision support — analyse image with gpt-4o.
+    # Sprint 3.11 — vision support: identify the racket in the photo and
+    # answer like a product inquiry. Bypasses the debounce buffer (same
+    # decision as audio — Sprint 2.7.2).
     if kind == "image":
-        logger.info("webhook_image_received phone_hash=%.8s", phone_hash)
-        background_tasks.add_task(_send_canned_text, raw_phone=raw_phone, text=_IMAGE_RESPONSE)
+        image_meta = message_dict.get("imageMessage") or {}
+        caption = str(image_meta.get("caption") or "")
+        logger.info(
+            "webhook_image_received phone_hash=%.8s has_caption=%s",
+            phone_hash,
+            bool(caption),
+        )
+        background_tasks.add_task(
+            _handle_image_message,
+            raw_phone=raw_phone,
+            phone_hash=phone_hash,
+            message_key=key,
+            caption=caption,
+        )
         return {"status": "ok", "kind": "image"}
 
     if kind == "document":
@@ -657,6 +693,114 @@ async def _handle_audio_message(
     )
 
 
+async def _handle_image_message(
+    raw_phone: str, phone_hash: str, message_key: dict[str, Any], caption: str
+) -> None:
+    """Sprint 3.11 — download the photo, identify the racket via vision,
+    dispatch as a product inquiry.
+
+    Guards mirror the audio hardening (Sprint 3.10), in order: per-customer
+    rate limit (before download), post-download size cap, identification
+    cache by content hash. Redis failures in the guards are fail-open.
+
+    Outcomes:
+    - vision says it's not a racket        → canned "não identifiquei raquete"
+    - racket but brand AND model unreadable → canned "me diz a marca/modelo"
+    - identified                            → synthetic "brand model" query
+      flows through ``_process_message`` with ``image_product_query=True``;
+      triage short-circuits to recommend, which confirms with photo-aware
+      wording and registers the product for price/detail follow-ups.
+    """
+    settings = get_settings()
+
+    # Guard 1 — rate limit per phone_hash, fixed 1h window. 0 disables.
+    limit = settings.image_rate_limit_per_hour
+    if limit > 0:
+        try:
+            count = await count_image_message(phone_hash)
+        except Exception as exc:
+            logger.warning("image_rate_limit_unavailable: %s — proceeding", exc)
+            count = 0
+        if count > limit:
+            logger.warning(
+                "image_rate_limited phone_hash=%.8s count=%d limit=%d",
+                phone_hash,
+                count,
+                limit,
+            )
+            await _send_canned_text(raw_phone, _IMAGE_RATE_LIMIT_RESPONSE)
+            return
+
+    try:
+        image_bytes, mime_type = await EvolutionClient().get_media_base64(message_key)
+    except Exception as exc:
+        logger.error("image_download_failed phone_hash=%.8s: %s", phone_hash, exc)
+        await _send_canned_text(raw_phone, _IMAGE_FAILURE_RESPONSE)
+        return
+
+    # Guard 2 — size cap after download.
+    if len(image_bytes) > settings.image_max_bytes:
+        logger.warning(
+            "image_rejected_too_big phone_hash=%.8s bytes=%d max=%d",
+            phone_hash,
+            len(image_bytes),
+            settings.image_max_bytes,
+        )
+        await _send_canned_text(raw_phone, _IMAGE_TOO_BIG_RESPONSE)
+        return
+
+    # Guard 3 — identification cache: identical photo (forwarded image,
+    # retry with a new message_id) never pays the vision call twice.
+    image_sha = hashlib.sha256(image_bytes).hexdigest()
+    identification: dict[str, Any] | None = None
+    try:
+        identification = await get_cached_image_id(image_sha)
+    except Exception as exc:
+        logger.warning("image_cache_read_failed: %s — identifying", exc)
+
+    if identification is None:
+        try:
+            identification = await identify_racket_image(image_bytes, mime_type, caption)
+        except Exception as exc:
+            logger.error("image_identification_failed phone_hash=%.8s: %s", phone_hash, exc)
+            await _send_canned_text(raw_phone, _IMAGE_FAILURE_RESPONSE)
+            return
+        try:
+            await cache_image_id(image_sha, identification, ttl=settings.image_id_cache_ttl)
+        except Exception as exc:
+            logger.warning("image_cache_write_failed: %s (ignored)", exc)
+    else:
+        logger.info(
+            "image_id_cache_hit phone_hash=%.8s sha=%.12s", phone_hash, image_sha
+        )
+
+    if not identification.get("is_racket"):
+        logger.info("image_not_racket phone_hash=%.8s", phone_hash)
+        await _send_canned_text(raw_phone, _IMAGE_NOT_RACKET_RESPONSE)
+        return
+
+    brand = (identification.get("brand") or "").strip()
+    model = (identification.get("model") or "").strip()
+    query = f"{brand} {model}".strip()
+    if not query:
+        logger.info("image_racket_unidentified phone_hash=%.8s", phone_hash)
+        await _send_canned_text(raw_phone, _IMAGE_UNIDENTIFIED_RESPONSE)
+        return
+
+    logger.info(
+        "image_to_product_query phone_hash=%.8s query=%.80s confidence=%s",
+        phone_hash,
+        query,
+        identification.get("confidence"),
+    )
+    await _process_message(
+        raw_phone=raw_phone,
+        phone_hash=phone_hash,
+        message_text=query,
+        extra_state={"image_product_query": True},
+    )
+
+
 # ── DEV_RESET_HOOK background task (REMOVE BEFORE PRODUCTION) ─────────────────
 
 async def _handle_reset_command(raw_phone: str, phone_hash: str) -> None:
@@ -686,11 +830,16 @@ async def _process_message(
     raw_phone: str,
     phone_hash: str,
     message_text: str,
+    extra_state: dict[str, Any] | None = None,
 ) -> None:
     """Invoke the agent graph and send the reply via WhatsApp.
 
     This runs in a FastAPI BackgroundTask so the webhook returns 200 immediately
     even though graph inference + network I/O can take several seconds.
+
+    ``extra_state`` (Sprint 3.11) lets media handlers inject turn-scoped
+    flags into the graph input (e.g. ``image_product_query`` for photo-born
+    product queries). Keys MUST exist in the AgentState TypedDict.
     """
     from sqlalchemy import func
     from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -729,6 +878,8 @@ async def _process_message(
         "handoff_reason": None,
         "response_blocks": [],
     }
+    if extra_state:
+        state_update.update(extra_state)
 
     try:
         # Sprint 2.6.5 — retry once on Redis-connection errors with a full

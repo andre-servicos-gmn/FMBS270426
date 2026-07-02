@@ -129,6 +129,20 @@ class Settings(BaseSettings):
     # em dev/staging para smoke test do loop (tools ainda são stubs). Lê de USE_V2.
     use_v2: bool = Field(default=False)
 
+    # Sprint 3.10 — audio hardening (Whisper cost guards, pre-production).
+    # audio_max_seconds: over-limit audio is rejected BEFORE download, from
+    #   the audioMessage.seconds metadata in the webhook payload.
+    # audio_max_bytes: post-download cap — fallback when seconds is absent
+    #   (forwarded files); also keeps us under Whisper's 25 MB API limit.
+    # audio_rate_limit_per_hour: max audios per phone_hash per hour (fixed
+    #   window). 0 disables the limit.
+    # audio_transcript_cache_ttl: seconds to keep a transcript cached by the
+    #   SHA-256 of the audio bytes, so identical audio never pays Whisper twice.
+    audio_max_seconds: int = Field(default=180)
+    audio_max_bytes: int = Field(default=8_000_000)
+    audio_rate_limit_per_hour: int = Field(default=10)
+    audio_transcript_cache_ttl: int = Field(default=86400)
+
     # Sprint 3.9 — buscar_catalogo só mostra produtos com estoque (stock > 0).
     # ON por default agora que o stock é espelhado em bling_products (filtro em
     # cima do snapshot, sem custo de API). Kill-switch via TOOLS_V2_FILTER_STOCK:

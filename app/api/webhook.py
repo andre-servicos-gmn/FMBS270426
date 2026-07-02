@@ -1,4 +1,5 @@
 """POST /webhook/whatsapp — receives messages from Evolution API (WhatsApp)."""
+import hashlib
 import logging
 import time
 import uuid
@@ -24,7 +25,13 @@ from app.api.debounce_buffer import DebounceBuffer
 from app.config import get_settings
 from app.security.audit_log import log_access
 from app.security.pii_masker import hash_phone, mask_pii
-from app.storage.redis_session import is_message_processed, mark_message_processed
+from app.storage.redis_session import (
+    cache_transcript,
+    count_audio_message,
+    get_cached_transcript,
+    is_message_processed,
+    mark_message_processed,
+)
 
 # Canned responses for unsupported / partially supported media kinds.
 _IMAGE_RESPONSE = (
@@ -40,6 +47,14 @@ _AUDIO_EMPTY_RESPONSE = (
 )
 _AUDIO_FAILURE_RESPONSE = (
     "Tive um problema pra processar seu áudio. Pode mandar por texto pra eu te ajudar?"
+)
+_AUDIO_TOO_LONG_RESPONSE = (
+    "Esse áudio ficou um pouco longo pra eu processar por aqui. Consegue mandar "
+    "um áudio mais curto ou resumir em texto?"
+)
+_AUDIO_RATE_LIMIT_RESPONSE = (
+    "Recebi vários áudios seus em pouco tempo. Pra eu conseguir te ajudar melhor "
+    "agora, me manda por texto?"
 )
 
 router = APIRouter()
@@ -454,6 +469,24 @@ async def webhook_whatsapp(
         return {"status": "ok", "kind": "document"}
 
     if kind == "audio":
+        # Sprint 3.10 — duration guard BEFORE download: WhatsApp voice notes
+        # carry their length in audioMessage.seconds, so an over-limit audio
+        # is rejected without paying the Evolution download or Whisper.
+        audio_meta = message_dict.get("audioMessage") or {}
+        seconds = audio_meta.get("seconds")
+        max_seconds = get_settings().audio_max_seconds
+        if isinstance(seconds, (int, float)) and seconds > max_seconds:
+            logger.info(
+                "audio_rejected_too_long phone_hash=%.8s seconds=%s max=%d",
+                phone_hash,
+                seconds,
+                max_seconds,
+            )
+            background_tasks.add_task(
+                _send_canned_text, raw_phone=raw_phone, text=_AUDIO_TOO_LONG_RESPONSE
+            )
+            return {"status": "ok", "kind": "audio", "rejected": "too_long"}
+
         logger.info("audio_received message_id=%s phone_hash=%.8s", message_id, phone_hash)
         background_tasks.add_task(
             _handle_audio_message,
@@ -533,12 +566,37 @@ async def _handle_audio_message(
 ) -> None:
     """Download the audio from Evolution, transcribe via Whisper, dispatch as text.
 
+    Sprint 3.10 guards, in order: per-customer rate limit (before download),
+    post-download size cap, transcript cache by content hash. Redis failures
+    in the guards are fail-open — a Redis blip must not take the audio path
+    down.
+
     On any infrastructure failure (download or transcription), send a polite
     canned response inviting the customer to switch to text. On an empty
     transcription (silent / inaudible audio), send a different canned
     message so the customer knows their attempt arrived but didn't carry
     intelligible speech.
     """
+    settings = get_settings()
+
+    # Guard 1 — rate limit per phone_hash, fixed 1h window. 0 disables.
+    limit = settings.audio_rate_limit_per_hour
+    if limit > 0:
+        try:
+            count = await count_audio_message(phone_hash)
+        except Exception as exc:
+            logger.warning("audio_rate_limit_unavailable: %s — proceeding", exc)
+            count = 0
+        if count > limit:
+            logger.warning(
+                "audio_rate_limited phone_hash=%.8s count=%d limit=%d",
+                phone_hash,
+                count,
+                limit,
+            )
+            await _send_canned_text(raw_phone, _AUDIO_RATE_LIMIT_RESPONSE)
+            return
+
     try:
         audio_bytes, mime_type = await EvolutionClient().get_media_base64(message_key)
     except Exception as exc:
@@ -546,12 +604,42 @@ async def _handle_audio_message(
         await _send_canned_text(raw_phone, _AUDIO_FAILURE_RESPONSE)
         return
 
-    try:
-        text = await transcribe_audio(audio_bytes, mime_type)
-    except Exception as exc:
-        logger.error("audio_transcription_failed phone_hash=%.8s: %s", phone_hash, exc)
-        await _send_canned_text(raw_phone, _AUDIO_FAILURE_RESPONSE)
+    # Guard 2 — size cap after download. Covers payloads without .seconds
+    # (forwarded audio files) that slipped past the webhook duration guard.
+    if len(audio_bytes) > settings.audio_max_bytes:
+        logger.warning(
+            "audio_rejected_too_big phone_hash=%.8s bytes=%d max=%d",
+            phone_hash,
+            len(audio_bytes),
+            settings.audio_max_bytes,
+        )
+        await _send_canned_text(raw_phone, _AUDIO_TOO_LONG_RESPONSE)
         return
+
+    # Guard 3 — transcript cache: identical audio (forwarded voice note,
+    # retry with a new message_id) never pays Whisper twice.
+    audio_sha = hashlib.sha256(audio_bytes).hexdigest()
+    text: str | None = None
+    try:
+        text = await get_cached_transcript(audio_sha)
+    except Exception as exc:
+        logger.warning("audio_cache_read_failed: %s — transcribing", exc)
+
+    if text is None:
+        try:
+            text = await transcribe_audio(audio_bytes, mime_type)
+        except Exception as exc:
+            logger.error("audio_transcription_failed phone_hash=%.8s: %s", phone_hash, exc)
+            await _send_canned_text(raw_phone, _AUDIO_FAILURE_RESPONSE)
+            return
+        try:
+            await cache_transcript(audio_sha, text, ttl=settings.audio_transcript_cache_ttl)
+        except Exception as exc:
+            logger.warning("audio_cache_write_failed: %s (ignored)", exc)
+    else:
+        logger.info(
+            "audio_transcript_cache_hit phone_hash=%.8s sha=%.12s", phone_hash, audio_sha
+        )
 
     if not text.strip():
         logger.info("audio_empty_transcription phone_hash=%.8s", phone_hash)

@@ -298,9 +298,13 @@ O agente é **deliberadamente raso** no diagnóstico para preservar o valor da *
 - ⏳ **Pendente** — `describe_image()` com GPT-4o vision (Sprint 1.13).
 - ⏳ Pendente — Regra adicional no `SYSTEM_DIAGNOSE` para extrair `modelo_desejado` de foto de raquete.
 
-**Limitações conhecidas do suporte a áudio (registrar antes de produção):**
-- Sem rate limit por phone_hash — cliente pode mandar 100 áudios e cada um paga Whisper ($0.006/min).
-- Sem cache de transcrições — áudio idêntico (mesmo hash) é re-transcrito.
-- Sem limite de duração — WhatsApp permite áudio de até ~16min, custo dispara.
+**Hardening do áudio (Sprint 3.10 — feito):**
+- ✅ Rate limit por phone_hash: `AUDIO_RATE_LIMIT_PER_HOUR` (default 10/h, janela fixa no Redis, 0 desativa). Fail-open se o Redis cair.
+- ✅ Cache de transcrição por SHA-256 do conteúdo: `AUDIO_TRANSCRIPT_CACHE_TTL` (default 24h) — áudio idêntico reenviado não re-paga Whisper.
+- ✅ Limite de duração/tamanho: `AUDIO_MAX_SECONDS` (default 180s, recusa ANTES do download lendo `audioMessage.seconds`) + `AUDIO_MAX_BYTES` (default 8MB, pós-download, fallback quando o payload não traz duração).
+- Testes em `tests/test_audio_hardening.py`.
+
+**Limitações conhecidas restantes do suporte a áudio:**
 - Base64 transita pela rede inteira a cada áudio (sem streaming).
 - Sem PII masking na transcrição: o texto vai pro grafo bruto e só é mascarado pelo `OpenAIClient.chat` antes da chamada LLM downstream.
+- Áudio transcrito NÃO passa pelo debounce buffer (vai direto pro grafo via `_process_message`) — comportamento intencional da Sprint 2.7.2, revisitar se rajadas texto+áudio gerarem resposta dupla.

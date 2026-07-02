@@ -141,3 +141,41 @@ async def is_message_processed(message_id: str) -> bool:
 async def mark_message_processed(message_id: str, ttl: int = 86400) -> None:
     """Mark message_id as processed for ttl seconds (default 24 h)."""
     await _get_redis_client().setex(f"{_MSG_PREFIX}:{message_id}", ttl, "1")
+
+
+# ── Sprint 3.10 — audio hardening primitives ──────────────────────────────────
+
+_AUDIO_RATE_PREFIX = "audio_rate"
+_AUDIO_TRANSCRIPT_PREFIX = "audio_transcript"
+
+
+async def count_audio_message(phone_hash: str, window_seconds: int = 3600) -> int:
+    """Increment this customer's audio counter and return the new total.
+
+    Fixed-window counter: the key expires ``window_seconds`` after the FIRST
+    audio of the window. Redis errors propagate — the caller decides the
+    fail-open policy.
+    """
+    key = f"{_AUDIO_RATE_PREFIX}:{phone_hash}"
+    client = _get_redis_client()
+    count = await client.incr(key)
+    if count == 1:
+        await client.expire(key, window_seconds)
+    return int(count)
+
+
+async def get_cached_transcript(audio_sha256: str) -> str | None:
+    """Return the cached transcript for this audio content hash, or None.
+
+    An empty string is a VALID cached value (silent audio already seen) —
+    distinct from None (cache miss).
+    """
+    raw = await _get_redis_client().get(f"{_AUDIO_TRANSCRIPT_PREFIX}:{audio_sha256}")
+    if raw is None:
+        return None
+    return raw.decode() if isinstance(raw, bytes) else str(raw)
+
+
+async def cache_transcript(audio_sha256: str, text: str, ttl: int = 86400) -> None:
+    """Store a transcript keyed by the SHA-256 of the audio bytes."""
+    await _get_redis_client().setex(f"{_AUDIO_TRANSCRIPT_PREFIX}:{audio_sha256}", ttl, text)

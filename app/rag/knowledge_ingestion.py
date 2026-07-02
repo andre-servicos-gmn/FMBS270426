@@ -54,7 +54,10 @@ async def upsert_documents(documents: list[dict[str, Any]]) -> dict[str, int]:
                         "source": doc.get("source", "manual"),
                         "embedding": embedding,
                         "is_active": doc.get("is_active", True),
-                        "metadata_": doc.get("metadata"),
+                        # DB column is "metadata" (model maps attr metadata_ -> column
+                        # "metadata"); on_conflict set_ needs the real column name, not
+                        # the ORM attribute, else Postgres errors on "metadata_".
+                        "metadata": doc.get("metadata"),
                     },
                 )
             )

@@ -698,6 +698,79 @@ def test_should_not_force_on_nonprice_smalltalk():
     assert _should_force_search(state, ai) is False
 
 
+def test_should_force_on_stock_question_answered_from_memory():
+    """Sprint 3.12 — the reported bug: 'tem em estoque?' answered 'temos sim!'
+    with tool_calls=0. Affirmative or negative, a stock answer without a
+    grounding tool this turn is a guess — force the search."""
+    from app.agent.supervisor import _should_force_search
+    stock_questions = [
+        "tem em estoque?",
+        "essa raquete tá disponível?",
+        "quantas unidades vocês tem?",
+        "tem pronta entrega?",
+        "posso retirar hoje na loja?",
+    ]
+    confident = AIMessage(content="Temos sim! Pode vir buscar.", tool_calls=[])
+    for q in stock_questions:
+        state = {"messages": [HumanMessage(content=q)]}
+        assert _should_force_search(state, confident) is True, f"did not force for: {q!r}"
+
+
+def test_should_not_force_stock_question_grounded_by_consultar_estoque():
+    """consultar_estoque ran this turn → the stock answer is grounded."""
+    from app.agent.supervisor import _should_force_search
+    state = {"messages": [
+        HumanMessage(content="tem em estoque?"),
+        AIMessage(content="", tool_calls=[{"name": "consultar_estoque", "args": {"produto_id": "1"}, "id": "c1"}]),
+        ToolMessage(content='{"id":"1","em_estoque":true,"quantidade":4}', tool_call_id="c1", name="consultar_estoque"),
+    ]}
+    ai = AIMessage(content="Temos 4 unidades em estoque.", tool_calls=[])
+    assert _should_force_search(state, ai) is False
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 3c. Fence profile gate: no profile signal in context → classifier skipped
+#     (production misfire replaced a correct stock answer with the pivot).
+# ════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_fence_skipped_without_profile_signal(monkeypatch):
+    """A plain purchase/stock turn carries no profile — the classifier must not
+    even run (deterministic skip), so a misfire can't swallow the answer."""
+    from app.agent import supervisor as sup
+
+    classifier = AsyncMock(return_value={"viola": True, "motivo": "misfire"})
+    monkeypatch.setattr(sup, "_classify_personalized_rec", classifier)
+
+    state = {"messages": [
+        HumanMessage(content="quero comprar a kronos, tem disponivel pra retirar hoje?"),
+        AIMessage(content="Temos 4 unidades da Kronos em estoque!", id="ai-1"),
+    ]}
+    result = await sup.fence_node(state)
+    assert result == {}, "fence must pass through untouched without profile signal"
+    classifier.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_fence_still_runs_with_profile_signal(monkeypatch):
+    """Profile signal present ('sou iniciante') → classifier runs and a
+    violation is replaced by the pivot, same as before."""
+    from app.agent import supervisor as sup
+
+    classifier = AsyncMock(return_value={"viola": True, "motivo": "profile pick"})
+    monkeypatch.setattr(sup, "_classify_personalized_rec", classifier)
+
+    state = {"messages": [
+        HumanMessage(content="sou iniciante, qual raquete eu compro?"),
+        AIMessage(content="Como você é iniciante, leve a Kronos!", id="ai-2"),
+    ]}
+    result = await sup.fence_node(state)
+    classifier.assert_awaited_once()
+    assert result["messages"][0].content == sup.CONSULTORIA_PIVOT
+    assert result["messages"][0].id == "ai-2"
+
+
 @pytest.mark.asyncio
 async def test_supervisor_node_forces_buscar_catalogo_on_hallucinated_unavailability(monkeypatch):
     """End-to-end of the guard: model first answers 'não encontrei' with NO

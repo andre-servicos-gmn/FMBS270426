@@ -885,7 +885,7 @@ def test_webhook_responds_200_immediately(webhook_app):
 
 @pytest.mark.asyncio
 async def test_process_webhook_product_updated_triggers_sync():
-    """A product.updated event triggers sync_single_product."""
+    """A product.updated event triggers sync_single_product + cache drops."""
     from app.api.bling import _process_webhook_event
     payload = {
         "event": "product.updated",
@@ -895,13 +895,21 @@ async def test_process_webhook_product_updated_triggers_sync():
     with patch(
         "app.api.bling.record_webhook_event",
         new_callable=AsyncMock, return_value=True,
-    ):
+    ), patch(
+        "app.api.bling.invalidate_stock", new_callable=AsyncMock,
+    ) as inv_stock, patch(
+        "app.api.bling.invalidate_catalog",
+    ) as inv_catalog:
         with patch("app.api.bling.BlingSync") as Sync:
             instance = Sync.return_value
             instance.sync_single_product = AsyncMock(return_value="updated")
             instance.delete_product = AsyncMock()
             await _process_webhook_event(payload)
     instance.sync_single_product.assert_awaited_once_with(42)
+    # The event changed the catalog — the live-stock cache for this product and
+    # the in-memory catalog snapshot must be dropped so the agent sees it now.
+    inv_stock.assert_awaited_once_with(42)
+    inv_catalog.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -915,12 +923,15 @@ async def test_process_webhook_out_of_order_event_ignored():
     with patch(
         "app.api.bling.record_webhook_event",
         new_callable=AsyncMock, return_value=False,  # older than what we already applied
-    ):
+    ), patch(
+        "app.api.bling.invalidate_stock", new_callable=AsyncMock,
+    ) as inv_stock:
         with patch("app.api.bling.BlingSync") as Sync:
             instance = Sync.return_value
             instance.sync_single_product = AsyncMock()
             await _process_webhook_event(payload)
     instance.sync_single_product.assert_not_called()
+    inv_stock.assert_not_called()  # nothing applied → nothing to invalidate
 
 
 @pytest.mark.asyncio
@@ -934,7 +945,11 @@ async def test_process_webhook_deleted_triggers_inactive():
     with patch(
         "app.api.bling.record_webhook_event",
         new_callable=AsyncMock, return_value=True,
-    ):
+    ), patch(
+        "app.api.bling.invalidate_stock", new_callable=AsyncMock,
+    ) as inv_stock, patch(
+        "app.api.bling.invalidate_catalog",
+    ) as inv_catalog:
         with patch("app.api.bling.BlingSync") as Sync:
             instance = Sync.return_value
             instance.delete_product = AsyncMock(return_value=True)
@@ -942,6 +957,8 @@ async def test_process_webhook_deleted_triggers_inactive():
             await _process_webhook_event(payload)
     instance.delete_product.assert_awaited_once_with(13)
     instance.sync_single_product.assert_not_called()
+    inv_stock.assert_awaited_once_with(13)
+    inv_catalog.assert_called_once()
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -998,6 +1015,28 @@ async def test_get_stock_returns_none_on_api_error():
         ):
             value = await get_stock(42)
     assert value is None
+
+
+@pytest.mark.asyncio
+async def test_get_stock_unknown_balance_not_cached_as_zero():
+    """Product absent from the /estoques/saldos response = UNKNOWN balance.
+    It must NOT be cached as "0" — that turned "don't know" into a hard
+    "esgotado" for the whole TTL and the agent denied stock it never read."""
+    from app.sync.bling_stock import get_stock
+
+    fake_redis = MagicMock()
+    fake_redis.get = AsyncMock(return_value=None)
+    fake_redis.setex = AsyncMock()
+    fake_redis.aclose = AsyncMock()
+    with patch("app.sync.bling_stock._get_redis", return_value=fake_redis):
+        with patch(
+            "app.adapters.bling.BlingClient.consultar_estoque",
+            new_callable=AsyncMock,
+            return_value={"data": [{"produto": {"id": 999}, "saldoFisicoTotal": 3}]},
+        ):
+            value = await get_stock(42)  # 42 not in the response
+    assert value is None
+    fake_redis.setex.assert_not_called()
 
 
 # ════════════════════════════════════════════════════════════════════════════

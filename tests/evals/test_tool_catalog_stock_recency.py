@@ -141,3 +141,59 @@ async def test_stock_and_recency_combined():
     ids = result_ids(await run_buscar(cat, "raquetes"))
     assert "1" not in ids, f"zero-stock newest leaked: {ids}"
     assert ids == ["3", "2"], f"survivors not newest-first: {ids}"
+
+
+# ── named lookup: out-of-stock product VISIBLE, marked esgotado (Sprint 3.12) ─
+#
+# Production bug: the customer asked for a product by NAME, the stock filter had
+# hidden it, and the agent answered about a DIFFERENT racket of the same brand.
+# A named lookup must return the asked product marked "estoque": "esgotado" so
+# the agent can say "está sem estoque" honestly. Browse/price/offer lists keep
+# excluding out-of-stock (the tests above stay canonical for those paths).
+
+async def test_named_lookup_returns_out_of_stock_marked_esgotado():
+    cat = _browse_catalog() + [
+        make_racket(9, "Raquete Drop Shot Proteo", 999.0, stock=0, created_at=dt(2026, 5, 1))
+    ]
+    results = await run_buscar(cat, "proteo")
+    by_id = {str(r["id"]): r for r in results}
+    assert "9" in by_id, f"named out-of-stock product hidden: {result_ids(results)}"
+    assert by_id["9"].get("estoque") == "esgotado", f"missing esgotado marker: {by_id['9']}"
+
+
+async def test_named_esgotado_exact_match_outranks_brand_match():
+    """'ama proteo' → the out-of-stock Proteo (exact model match) must come
+    BEFORE the in-stock Kronos (incidental brand-only match) — the production
+    bug was the agent answering about the Kronos."""
+    cat = [
+        make_racket(1, "Raquete Ama Kronos", 2999.0, stock=5),
+        make_racket(2, "Raquete Ama Proteo", 2899.0, stock=0),
+    ]
+    ids = result_ids(await run_buscar(cat, "ama proteo"))
+    assert ids and ids[0] == "2", f"esgotado exact match must rank first: {ids}"
+    assert "1" in ids, f"in-stock brand sibling should still appear: {ids}"
+
+
+async def test_named_lookup_with_price_filter_keeps_excluding_esgotado():
+    """A brand + price-ceiling ask is an OFFER list — dead stock stays out even
+    though the query has distinctive name tokens."""
+    cat = [
+        make_racket(1, "Raquete Drop Shot Sem", 800.0, stock=0),
+        make_racket(2, "Raquete Drop Shot Com", 900.0, stock=5),
+    ]
+    ids = result_ids(await run_buscar(cat, "drop shot", preco_max=1000))
+    assert "1" not in ids, f"esgotado leaked into a price-capped offer list: {ids}"
+    assert "2" in ids
+
+
+async def test_output_carries_stock_status_field():
+    """In-stock results say "disponivel"; unknown stock omits the field (the
+    agent then falls back to consultar_estoque)."""
+    cat = [
+        make_racket(1, "Raquete Drop Shot Alpha", 999.0, stock=5),
+        make_racket(2, "Raquete Drop Shot Alpha Pro", 999.0, stock=OMIT),
+    ]
+    results = await run_buscar(cat, "alpha")
+    by_id = {str(r["id"]): r for r in results}
+    assert by_id["1"].get("estoque") == "disponivel", f"missing disponivel marker: {by_id['1']}"
+    assert "estoque" not in by_id["2"], f"unknown stock must omit the field: {by_id['2']}"

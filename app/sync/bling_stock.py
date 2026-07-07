@@ -78,10 +78,11 @@ async def get_stock(produto_id: int) -> int | None:
             logger.warning("bling_stock unexpected_error id=%s: %s", produto_id, exc)
             return None
 
-        await redis.setex(
-            key, settings.bling_stock_cache_ttl,
-            str(saldo) if saldo is not None else "0",
-        )
+        # Only cache a KNOWN balance. Caching None as "0" turned "unknown"
+        # (product absent from the Bling response) into a hard "esgotado" for
+        # the whole TTL — the agent then denied stock it never actually read.
+        if saldo is not None:
+            await redis.setex(key, settings.bling_stock_cache_ttl, str(saldo))
         logger.info("bling_stock fetched id=%s value=%s", produto_id, saldo)
         return saldo
     finally:

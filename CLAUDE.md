@@ -297,6 +297,16 @@ O agente é **deliberadamente raso** no diagnóstico para preservar o valor da *
 - ✅ **Feito na Sprint 1.12** — Documento: resposta canned, grafo não invocado. Sticker/vídeo: ignorados silenciosamente.
 - ✅ **Feito na Sprint 3.11** — Foto de raquete: `identify_racket_image()` em `app/adapters/media_processor.py` com GPT-4o vision (`OPENAI_VISION_MODEL`, saída JSON `{is_racket, brand, model, confidence}`, prompt `SYSTEM_RACKET_VISION`, legenda passa pelo PII masker antes do envio). O webhook baixa a foto, identifica e injeta uma query sintética "marca modelo" no grafo com a flag `image_product_query=True`; o triage short-circuita pra `product_inquiry` (sem LLM) e o `recommend_node` responde com fraseado photo-aware ("Pela foto, essa é a *X* — e temos ela aqui!"), registrando o produto pros follow-ups de preço/detalhe como em qualquer product_inquiry. Foto sem raquete ou com modelo ilegível → canned pedindo o modelo em texto, grafo não invocado. Substitui o plano antigo de `describe_image()` + regra no `SYSTEM_DIAGNOSE` (diagnose deprecated desde a 2.6).
 
+**Leitura de estoque (Sprint 3.12 — feito):**
+- ✅ `buscar_catalogo` expõe `"estoque": "disponivel" | "esgotado"` (espelho local; campo omitido quando desconhecido) em cada resultado, e busca POR NOME (sem filtro de preço) devolve produto esgotado marcado `esgotado` em vez de escondê-lo — antes o agente respondia sobre OUTRA raquete da mesma marca porque a pedida estava invisível. Listas de oferta (browse/preço/categoria) continuam excluindo esgotados.
+- ✅ Prompt do supervisor: regra dura ESTOQUE E DISPONIBILIDADE — pergunta de estoque exige `consultar_estoque` (ao vivo) antes de responder; proibido responder sobre produto diferente do nomeado.
+- ✅ Guard determinístico (trigger 4 em `_should_force_search`): pergunta de estoque/disponibilidade respondida com `tool_calls=0` e sem tool de grounding no turno → re-executa forçando `buscar_catalogo`.
+- ✅ Fence com gate determinístico de perfil (`_PROFILE_SIGNAL_RE`): sem sinal de perfil (nível/lesão/estilo/"pra mim") nas últimas 2 mensagens do cliente, o classificador nem roda — misfire substituía uma resposta correta de estoque pelo pitch da Consultoria.
+- ✅ `get_stock` não cacheia mais saldo desconhecido como "0" (transformava "não sei" em "esgotado" por 5 min).
+- ✅ Webhook do Bling invalida `bling:stock:<id>` (Redis) e o snapshot do catálogo ao aplicar evento (as docstrings dos caches prometiam; não estava ligado).
+- Testes em `tests/evals/test_tool_catalog_stock_recency.py` (named-lookup esgotado), `tests/test_v2_supervisor.py` (trigger 4 + fence gate) e `tests/test_bling_integration.py` (cache + webhook).
+- Limitação que continua: o espelho `stock` em `bling_products` só atualiza no full_sync diário (04:00 UTC) e em webhook de EDIÇÃO de produto — venda/movimentação de estoque no Bling não dispara webhook de produto. O dado ao vivo vem do `consultar_estoque` (cache 5 min).
+
 **Hardening da foto (Sprint 3.11 — mesmo padrão do áudio 3.10):**
 - ✅ Rate limit por phone_hash: `IMAGE_RATE_LIMIT_PER_HOUR` (default 10/h, janela fixa no Redis, 0 desativa). Fail-open se o Redis cair.
 - ✅ Cache de identificação por SHA-256 do conteúdo: `IMAGE_ID_CACHE_TTL` (default 24h) — foto idêntica reenviada não re-paga o vision.

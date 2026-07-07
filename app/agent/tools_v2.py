@@ -166,6 +166,19 @@ def _has_stock(product: dict[str, Any]) -> bool:
         return True
 
 
+def _stock_status(product: dict[str, Any]) -> str | None:
+    """Mirrored-stock status for the tool output: "disponivel" / "esgotado",
+    or None when the mirror doesn't know (field absent/unparseable) — in that
+    case the field is omitted so the LLM falls back to consultar_estoque."""
+    stock = product.get("stock")
+    if stock is None:
+        return None
+    try:
+        return "disponivel" if int(stock) > 0 else "esgotado"
+    except (TypeError, ValueError):
+        return None
+
+
 def _created_at_key(product: dict[str, Any]) -> str:
     """Recency sort key (newest first when sorted reverse=True). Falls back to
     last_synced_at then ''. Empty when the field is absent (e.g. unit-test
@@ -319,7 +332,9 @@ async def buscar_catalogo(
 ) -> str:
     """Busca produtos no catálogo da Base Sports por nome, marca, categoria ou faixa de preço.
     Use sempre que o cliente mencionar um produto, pedir comparação, ou perguntar o que existe.
-    Para comparar dois produtos, chame uma vez para cada. Retorna lista com id, nome e preço.
+    Para comparar dois produtos, chame uma vez para cada. Retorna lista com id, nome, preço e,
+    quando conhecido, "estoque" ("disponivel" ou "esgotado" — espelho local, pode estar
+    defasado; para confirmar disponibilidade ao vivo use consultar_estoque com o id).
 
     consulta: nome/marca do produto. Pode ser vazio quando a busca é só por
     categoria e/ou preço (ex: "as mais baratas de beach tennis" não tem nome).
@@ -384,8 +399,17 @@ async def buscar_catalogo(
     # Sprint 3.9 — drop out-of-stock products up front (cheap: stock is mirrored
     # into the snapshot). stock None/absent = unknown = kept; only positive 0 is
     # dropped. Done before category/price/ranking so it never leaks downstream.
+    #
+    # Sprint 3.12 — the dropped products are KEPT ASIDE: when the customer NAMES
+    # a product (distinctive tokens, no price ask), an out-of-stock match must be
+    # VISIBLE (marked "esgotado") or the agent can never say "está sem estoque" —
+    # in production it substituted a sibling product of the same brand instead.
+    # Browse/price/offer lists keep excluding out-of-stock entirely.
+    out_of_stock: list[dict[str, Any]] = []
     if _stock_filter_enabled():
+        out_of_stock = [p for p in products if not _has_stock(p)]
         products = [p for p in products if _has_stock(p)]
+    named_lookup = bool(distinctive) and not has_price_filter and not sort_by_price
 
     # ── Category filter ───────────────────────────────────────────────────────
     # Explicit categoria param wins. Otherwise, a price/sort query defaults to
@@ -473,10 +497,40 @@ async def buscar_catalogo(
         # Sprint 3.9 — no name, no price/category intent → newest first.
         ranked = sorted(products, key=_created_at_key, reverse=True)[:5]
 
-    out = [
-        {"id": str(p.get("id")), "nome": p.get("name"), "preco": _price_brl(p.get("price_cents"))}
-        for p in ranked
-    ]
+    # ── Out-of-stock NAME matches (Sprint 3.12) ──────────────────────────────
+    # A named lookup merges back the out-of-stock products that actually match
+    # the name (score > 0), so the agent sees the product the customer asked
+    # for and can answer "esgotado" honestly. Merged by score (in-stock wins
+    # ties) so an exact out-of-stock match outranks an incidental brand match —
+    # the production bug was answering about a DIFFERENT in-stock racket.
+    if named_lookup and out_of_stock:
+        pool = out_of_stock
+        if has_category:
+            pool = [p for p in pool if _matches_category(p, categoria)]
+        oos_matches = sorted(
+            ((p, _score_product(q_tokens, p)) for p in pool),
+            key=lambda ps: -ps[1],
+        )
+        oos_matches = [(p, s) for p, s in oos_matches if s > 0][:3]
+        if oos_matches:
+            merged = [(p, _score_product(q_tokens, p), 1) for p in ranked]
+            merged += [(p, s, 0) for p, s in oos_matches]
+            merged.sort(key=lambda t: (-t[1], -t[2]))
+            ranked = [p for p, _, _ in merged][: max(5, _PRICE_RANGE_TOP_N)]
+
+    out = []
+    for p in ranked:
+        item = {
+            "id": str(p.get("id")),
+            "nome": p.get("name"),
+            "preco": _price_brl(p.get("price_cents")),
+        }
+        # Mirrored stock status; omitted when the mirror doesn't know, so the
+        # LLM falls back to consultar_estoque instead of trusting a blank.
+        status = _stock_status(p)
+        if status is not None:
+            item["estoque"] = status
+        out.append(item)
     # Price range of what we actually returned — lets us audit that a ceiling
     # query came back SPREAD (low..high) rather than clustered at the bottom.
     ranked_prices = [pr for pr in (_price_reais(p) for p in ranked) if pr is not None]
@@ -557,7 +611,10 @@ async def detalhes_produto(produto_id: str) -> str:
 
 @tool
 async def consultar_estoque(produto_id: str) -> str:
-    """Consulta a disponibilidade em estoque de um produto pelo id."""
+    """Consulta AO VIVO a disponibilidade em estoque de um produto pelo id (o id vem do
+    buscar_catalogo). SEMPRE chame antes de afirmar que um produto tem ou não tem estoque,
+    quantas unidades restam, ou se dá pra retirar na loja — o campo "estoque" do
+    buscar_catalogo é um espelho que pode estar defasado; esta ferramenta é a verdade."""
     try:
         pid = int(produto_id)
     except (TypeError, ValueError):

@@ -25,7 +25,9 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app.adapters.bling import BlingClient, BlingError, BlingNotAuthorizedError
 from app.config import get_settings
+from app.sync.bling_catalog_cache import invalidate_catalog
 from app.sync.bling_repo import record_webhook_event
+from app.sync.bling_stock import invalidate_stock
 from app.sync.bling_sync import BlingSync
 
 logger = logging.getLogger(__name__)
@@ -178,8 +180,21 @@ async def _process_webhook_event(payload: dict[str, Any]) -> None:
             )
     except BlingNotAuthorizedError:
         logger.warning("bling_webhook skipped — not authorized yet (id=%s)", produto_id)
+        return
     except Exception as exc:
         logger.exception("bling_webhook_apply_failed id=%s: %s", produto_id, exc)
+        return
+
+    # The event changed the local catalog — drop the caches so the agent sees
+    # it NOW instead of after the TTL: the per-product live-stock cache (up to
+    # 5 min stale) and the in-memory catalog snapshot (up to 60 s stale). Both
+    # cache modules promised this wiring in their docstrings; a cache blip must
+    # never fail the webhook, hence the guard.
+    try:
+        await invalidate_stock(produto_id)
+        invalidate_catalog()
+    except Exception as exc:  # noqa: BLE001 — cache invalidation is best-effort
+        logger.warning("bling_webhook cache_invalidation_failed id=%s: %s", produto_id, exc)
 
 
 @router.post("/webhook")

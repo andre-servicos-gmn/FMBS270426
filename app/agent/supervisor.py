@@ -147,7 +147,20 @@ SYSTEM_SUPERVISOR_TEMPLATE = (
     "preço, e ofereça mostrar. Ex: \"Não temos raquete de beach tennis abaixo de "
     "R$ 1.000. A mais em conta é a Fulana, a R$ 1.299. Quer ver ela?\" — pra "
     "achar essa mais barata, refaça a busca só com a categoria e "
-    "ordenacao=\"preco_asc\", sem a faixa.\n\n"
+    "ordenacao=\"preco_asc\", sem a faixa.\n"
+    "ESTOQUE E DISPONIBILIDADE (regra dura): quando o cliente perguntar se um "
+    "produto tem em estoque, está disponível, quantas unidades restam, ou se dá "
+    "pra retirar na loja, SEMPRE confirme com consultar_estoque (usando o id que "
+    "veio do buscar_catalogo) ANTES de responder, e responda com o dado real. "
+    "NUNCA afirme \"temos em estoque\" nem \"está esgotado\" de memória. O campo "
+    "\"estoque\" que vem no buscar_catalogo é um espelho local que pode estar "
+    "defasado: serve de sinal, não de resposta final a uma pergunta de estoque. "
+    "Se o produto que o cliente NOMEOU vier marcado \"esgotado\", confirme com "
+    "consultar_estoque e, se estiver esgotado mesmo, diga com honestidade que "
+    "está sem estoque no momento e ofereça uma alternativa parecida que esteja "
+    "disponível. É PROIBIDO responder sobre um produto DIFERENTE como se fosse o "
+    "que o cliente pediu: se ele perguntou da raquete X, a resposta é sobre a X "
+    "(mesmo que esgotada), nunca sobre a Y só porque a Y apareceu na busca.\n\n"
     "O LIMITE DA CONSULTORIA (regra dura)\n"
     "Você nunca recomenda um produto específico baseado no perfil pessoal que o "
     "cliente contou (nível, corpo, lesão, estilo, objetivo). Esse salto, do "
@@ -382,6 +395,27 @@ _FENCE_SYSTEM = (
 )
 
 
+# Deterministic pre-gate for the fence: a PERSONALIZED recommendation (product
+# picked from the customer's personal profile) is only possible when the recent
+# customer messages actually CARRY profile signals — level, injury, style, "pra
+# mim", age/experience. Without any signal, the classifier has nothing real to
+# flag, and in production it misfired on a plain purchase turn ("quero comprar a
+# kronos, tem disponível?") replacing a correct stock answer with the Consultoria
+# pivot. No signal in context → skip the classifier entirely (deterministic).
+_PROFILE_SIGNAL_RE = re.compile(
+    r"(?i)("
+    r"\biniciant|\bintermedi|\bavan[çc]ad|\bn[íi]vel\b|"
+    r"\bles[ãa]o|\blesionad|\btendinite|\bdor\s+n[oa]s?\b|"
+    r"\bcotovelo|\bombro\b|\bpunho|\bjoelho|"
+    r"\bmeu\s+jogo\b|\bminha\s+pegada\b|\bestilo\b|"
+    r"\bpra\s+mim\b|\bpara\s+mim\b|\bme\s+recomenda|\bme\s+indica|"
+    r"\bqual\s+(eu\s+)?(compro|levo)\b|"
+    r"\bevoluir\b|\bcome[çc]and|\bcome[çc]ei\b|\bjogo\s+h[áa]\b|"
+    r"\banos?\s+de\s+(jogo|pr[áa]tica|quadra)|\bcanhot|\bdestr[oa]\b"
+    r")",
+)
+
+
 def _recent_client_context(messages: list[BaseMessage], n: int = 2) -> str:
     """Render the last ``n`` HumanMessages as the classifier context."""
     humans = [m for m in messages if getattr(m, "type", None) == "human"]
@@ -446,6 +480,11 @@ async def fence_node(state: AgentStateV2) -> dict:
         return {}
 
     contexto = _recent_client_context(messages, n=2)
+    # Deterministic skip: no profile signal in the recent customer messages →
+    # a profile-based recommendation is impossible by definition; don't give
+    # the (fallible) classifier a chance to swallow a good answer.
+    if not _PROFILE_SIGNAL_RE.search(contexto):
+        return {}
     verdict = await _classify_personalized_rec(contexto, resposta)
     if not verdict["viola"]:
         return {}
@@ -582,6 +621,20 @@ _PRICE_INTENT_RE = re.compile(
     r")",
 )
 
+# STOCK/AVAILABILITY intent: the customer asks whether a product is in stock,
+# how many units are left, or if they can pick it up. Production symptom: the
+# model answers "temos sim!" (or "está esgotado") from memory, with tool_calls=0
+# — it never read the stock. Any stock question answered without a grounding
+# tool call this turn is the bug itself, regardless of phrasing; we force a
+# buscar_catalogo (which carries the mirrored stock status and the id the model
+# needs for a live consultar_estoque on the next loop turn).
+_STOCK_INTENT_RE = re.compile(
+    r"(?i)("
+    r"estoque|dispon[íi]vel|disponibilidade|\bunidades?\b|"
+    r"pronta\s+entrega|\bretirar\b|\btem\s+a[íi]\b|\btem\s+na\s+loja\b"
+    r")",
+)
+
 # LEVEL intent: the customer qualifies by skill level ("sou avançado", "quero as
 # melhores", "uma pra evoluir"). The catalog has NO level field, so gpt-4o-mini
 # tends to answer "não temos pra avançado" WITHOUT searching — the exact
@@ -622,6 +675,22 @@ def _searched_in_recent_tail(messages: list[BaseMessage]) -> bool:
             content = m.content if isinstance(m.content, str) else str(m.content)
             if _tool_result_has_items(content):
                 return True
+    return False
+
+
+def _grounding_tool_ran_in_tail(messages: list[BaseMessage]) -> bool:
+    """True if ANY catalog/stock tool produced a result since the last human
+    message — a stock answer this turn is then grounded (even an honest
+    "não consegui confirmar" from consultar_estoque counts: it came from the
+    tool, not from memory)."""
+    for m in reversed(messages):
+        role = getattr(m, "type", None)
+        if role == "human":
+            return False
+        if role == "tool" and getattr(m, "name", "") in (
+            "buscar_catalogo", "consultar_estoque", "detalhes_produto",
+        ):
+            return True
     return False
 
 
@@ -724,6 +793,15 @@ def _should_force_search(state: AgentStateV2, ai: AIMessage) -> bool:
     # avançado". Force a real search; the answer then grounds in real products
     # and the prompt steers it to the Consultoria pivot instead of the negative.
     if _LEVEL_INTENT_RE.search(last_human) and _UNAVAILABILITY_RE.search(content):
+        return True
+
+    # Trigger 4 — a STOCK/AVAILABILITY question answered with NO grounding tool
+    # this turn. Affirmative ("temos sim!") or negative, both are guesses when
+    # neither buscar_catalogo nor consultar_estoque ran — force the search so
+    # the answer comes from the mirrored status + live stock, never memory.
+    # No catalog-keyword conjunction: the follow-up shape ("tá disponível?",
+    # "tem em estoque?") rarely names the product again.
+    if _STOCK_INTENT_RE.search(last_human) and not _grounding_tool_ran_in_tail(messages):
         return True
 
     return False

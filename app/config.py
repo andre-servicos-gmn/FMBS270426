@@ -112,10 +112,10 @@ class Settings(BaseSettings):
     store_maps_url: str = Field(default="")
     store_phone: str = Field(default="")
 
-    # E-commerce online da Base Sports (venda online com PIX). Default VAZIO
-    # pela mesma regra de segurança do endereço: sem link, o agente menciona o
-    # e-commerce mas NÃO inventa URL — pede pro cliente confirmar o link. O
-    # André preenche o link real no .env antes do deploy.
+    # E-commerce online da Base Sports. NÃO É MAIS USADO no prompt: o WhatsApp
+    # virou canal de venda presencial-only (decisão do André, jul/2026) e o
+    # build_system_prompt ignora este valor de propósito — o agente nunca
+    # oferece compra online/PIX/link. Campo mantido só pra compat de .env.
     ecommerce_url: str = Field(default="")
 
     # Consultoria Base Esportes — produto pago de consultoria com teste em

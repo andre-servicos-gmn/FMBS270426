@@ -112,7 +112,9 @@ def _tool_names_this_turn(result, n_before: int) -> list[str]:
 
 
 # Store identity is set EXPLICITLY in the test (the prod default is empty for
-# safety) so T9 can assert against known canonical values.
+# safety) so T9 can assert against known canonical values. ECOMMERCE_URL is
+# set ON PURPOSE: the channel is presential-only and the prompt must ignore
+# it — T9 asserts the link never surfaces even when configured.
 _STORE_NAME = "Base Sports"
 _STORE_ADDRESS = "Av. Beira Mar, 1234, Florianópolis"
 _STORE_HOURS = "seg a sáb, 9h às 19h"
@@ -223,22 +225,18 @@ async def test_felipe_replay_behaviour(patched_data_layer):
     assert "consultoria" in t8 or "avaliar" in t8 or "quadra" in t8 or "não posso" in t8 or "nao posso" in t8, \
         f"T8 should hold the line: {t8[:300]}"
 
-    # ── Purchase turn (T9) — must offer BOTH channels: online e-commerce (the
-    #    canonical URL + PIX) AND the physical store (the canonical address).
-    #    No invented link, no human escalation. ────────────────────────────
+    # ── Purchase turn (T9) — presential-only channel: direct to the PHYSICAL
+    #    store (the canonical address), never offer the online channel even
+    #    though ECOMMERCE_URL is configured in the fixture (the prompt ignores
+    #    it). No link of any kind, no PIX pitch, no human escalation. ──────
     # Physical channel: the canonical address (not a hallucinated one).
     assert "beira mar" in t_buy, f"T9 missing physical store address: {t_buy[:300]}"
-    # Online channel: the canonical e-commerce signalled (url host OR pix).
-    assert ("basesports" in t_buy or "loja.basesports" in t_buy or "pix" in t_buy
-            or "e-commerce" in t_buy or "ecommerce" in t_buy or "online" in t_buy), \
-        f"T9 missing online channel: {t_buy[:300]}"
-    # Must NOT claim physical-only.
-    assert not ("apenas na loja" in t_buy or "só na loja" in t_buy or "somente na loja" in t_buy
-                or "não vende online" in t_buy or "nao vende online" in t_buy), \
-        f"T9 falsely claimed physical-only: {t_buy[:300]}"
-    # Must NOT invent a DIFFERENT link than the canonical one.
-    invented_link = re.search(r"https?://(?!loja\.basesports)", t_buy)
-    assert not invented_link, f"T9 invented a link: {t_buy[:300]}"
+    # Must NOT offer the online channel: no URL at all, no PIX.
+    assert not re.search(r"https?://", t_buy), f"T9 offered a link: {t_buy[:300]}"
+    assert "pix" not in t_buy, f"T9 pitched PIX/online purchase: {t_buy[:300]}"
+    # Must NOT ask the banned online-vs-store question.
+    assert "online ou" not in t_buy and "ou online" not in t_buy, \
+        f"T9 asked online vs store: {t_buy[:300]}"
     assert "escalar_humano" not in tools_buy, f"T9 should NOT escalate: tools={tools_buy}"
 
     # ── Scheduling turn (T10) — must escalate to a human; dossier fires with a

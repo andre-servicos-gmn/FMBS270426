@@ -428,42 +428,46 @@ def test_system_prompt_configured_address_is_pinned(monkeypatch):
     get_settings.cache_clear()
 
 
-def test_system_prompt_ecommerce_url_pinned_when_set(monkeypatch):
-    """With ecommerce_url set, the canonical link is pinned (PIX + discount)."""
+def test_system_prompt_ignores_ecommerce_url(monkeypatch):
+    """Presential-only channel: even with ECOMMERCE_URL configured, the prompt
+    must NOT pin the link nor pitch the online channel (PIX discount etc.)."""
     monkeypatch.setenv("ECOMMERCE_URL", "https://loja.basesports.com.br")
     from app.config import get_settings
     get_settings.cache_clear()
 
     from app.agent.supervisor import build_system_prompt
     prompt = build_system_prompt()
-    assert "https://loja.basesports.com.br" in prompt
-    assert "pix" in prompt.lower()
+    assert "https://loja.basesports.com.br" not in prompt
+    assert "http" not in prompt.lower()  # no link of any kind
+    assert "pix e ganhar" not in prompt.lower()  # no PIX discount pitch
     get_settings.cache_clear()
 
 
-def test_system_prompt_empty_ecommerce_url_no_invented_link(monkeypatch):
-    """Safety rule: with ecommerce_url EMPTY, the e-commerce is mentioned but no
-    URL is invented — the agent asks the customer to confirm the link."""
+def test_system_prompt_purchase_is_store_only(monkeypatch):
+    """The purchase section directs the customer to the physical store and
+    forbids offering online purchase / payment link / PIX on this channel."""
     monkeypatch.setenv("ECOMMERCE_URL", "")
     from app.config import get_settings
     get_settings.cache_clear()
 
     from app.agent.supervisor import build_system_prompt
     prompt = build_system_prompt()
-    assert "http" not in prompt.lower()  # no link of any kind
-    assert "e-commerce" in prompt.lower()
-    assert "confirmar o link" in prompt.lower() or "confirme o link" in prompt.lower()
+    assert "LOJA FÍSICA" in prompt
+    assert "NUNCA ofereça compra online" in prompt
+    assert "prefere comprar online ou na loja" in prompt  # the banned question
     get_settings.cache_clear()
 
 
-def test_system_prompt_no_online_only_claim(monkeypatch):
-    """The prompt must NOT claim sale is 'only in the physical store'."""
+def test_system_prompt_greeting_is_adaptive_not_canned(monkeypatch):
+    """The greeting rule must keep the 'Sou o assistente Base' signature but no
+    longer mandate a verbatim canned opening glued to a second answer."""
     from app.config import get_settings
     get_settings.cache_clear()
     from app.agent.supervisor import build_system_prompt
-    prompt = build_system_prompt().lower()
-    assert "não online" not in prompt and "nao online" not in prompt
-    assert "apenas na loja" not in prompt and "só na loja" not in prompt
+    prompt = build_system_prompt()
+    assert "Sou o assistente Base" in prompt
+    assert "abra exatamente com" not in prompt
+    assert "Me conta qual sua primeira duvida" not in prompt
     get_settings.cache_clear()
 
 

@@ -20,9 +20,12 @@ _DETAIL = {
 _PRODUCT = {"id": 123, "name": "Raquete Beach Tennis Drop Shot Pentax 3.0", "imagem_url": None}
 
 
-def _photo_msg(url: str, legenda: str = "X", call_id: str = "c1") -> ToolMessage:
+def _photo_msg(url: str, legenda: str = "X", call_id: str = "c1", pid: int | None = None) -> ToolMessage:
+    data = {"status": "ok", "url": url, "legenda": legenda}
+    if pid is not None:
+        data["produto_id"] = pid
     return ToolMessage(
-        content=json.dumps({"status": "ok", "url": url, "legenda": legenda}),
+        content=json.dumps(data),
         name=FOTO_TOOL_NAME,
         tool_call_id=call_id,
     )
@@ -49,14 +52,16 @@ def test_external_wins_over_internal():
 
 # ── tool ─────────────────────────────────────────────────────────────────────
 
-async def _run_tool(bling_resp=None, bling_exc=None, product=_PRODUCT) -> dict:
+async def _run_tool(bling_resp=None, bling_exc=None, product=_PRODUCT, messages=None) -> dict:
     client = MagicMock()
     client.consultar_produto = AsyncMock(return_value=bling_resp, side_effect=bling_exc)
     with (
         patch("app.adapters.bling.BlingClient", return_value=client),
         patch("app.sync.bling_repo.fetch_product_by_id", AsyncMock(return_value=product)),
     ):
-        raw = await enviar_foto_produto.ainvoke({"produto_id": "123"})
+        raw = await enviar_foto_produto.ainvoke(
+            {"produto_id": "123", "state": {"messages": messages or []}}
+        )
     return json.loads(raw)
 
 
@@ -65,6 +70,16 @@ async def test_tool_queues_live_bling_photo_with_human_caption():
     out = await _run_tool(bling_resp={"data": _DETAIL})
     assert out["url"] == "https://bling.example/img/123.jpg?sig=abc"
     assert out["legenda"] == "Drop Shot Pentax 3.0"
+    assert out["produto_id"] == 123
+
+
+@pytest.mark.asyncio
+async def test_tool_refuses_photo_already_sent_in_conversation():
+    """Production: "bonita em" after the photo made the model resend it."""
+    earlier = [HumanMessage(content="manda foto"), _photo_msg("https://old/sig1.jpg", pid=123),
+               AIMessage(content="Essa é a Pentax."), HumanMessage(content="bonita em")]
+    out = await _run_tool(bling_resp={"data": _DETAIL}, messages=earlier)
+    assert "url" not in out and "aviso" in out
 
 
 @pytest.mark.asyncio
@@ -82,7 +97,7 @@ async def test_tool_reports_missing_photo():
 
 @pytest.mark.asyncio
 async def test_tool_rejects_bad_id():
-    raw = await enviar_foto_produto.ainvoke({"produto_id": "abc"})
+    raw = await enviar_foto_produto.ainvoke({"produto_id": "abc", "state": {"messages": []}})
     assert "erro" in json.loads(raw)
 
 
@@ -193,3 +208,13 @@ async def test_webhook_sends_photo_before_text():
 @pytest.mark.asyncio
 async def test_webhook_photo_failure_still_sends_text():
     assert await _process(RuntimeError("evolution 400")) == ["image:https://x/pentax.jpg", "text"]
+
+
+def test_same_product_with_different_signed_links_sent_once():
+    msgs = [
+        HumanMessage(content="foto"),
+        _photo_msg("https://s3/a.jpg?sig=1", call_id="a", pid=7),
+        _photo_msg("https://s3/a.jpg?sig=2", call_id="b", pid=7),
+        AIMessage(content="Essa é ela."),
+    ]
+    assert [p["url"] for p in photos_from_turn(msgs)] == ["https://s3/a.jpg?sig=1"]

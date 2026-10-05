@@ -725,17 +725,30 @@ async def _fresh_image_url(pid: int) -> str | None:
 
 
 @tool(FOTO_TOOL_NAME)
-async def enviar_foto_produto(produto_id: str) -> str:
+async def enviar_foto_produto(
+    produto_id: str, state: Annotated[dict, InjectedState]
+) -> str:
     """Envia ao cliente, pelo WhatsApp, a foto de um produto pelo id (o id vem do
     buscar_catalogo). Use quando o cliente pedir foto, imagem ou quiser ver o produto,
     ou quando ele demonstrar interesse em UM produto específico. Não mande foto de
-    lista inteira: no máximo 3 fotos por resposta. A foto chega ANTES do seu texto,
-    então não diga "segue abaixo". Se voltar erro, diga que não tem foto cadastrada
+    lista inteira: no máximo 3 fotos por resposta. Nunca mande de novo a foto de um
+    produto que já foi enviada na conversa. A foto chega ANTES do seu texto,
+    então não diga "segue abaixo". Se voltar erro, diga que não tem foto
     daquele produto."""
     try:
         pid = int(produto_id)
     except (TypeError, ValueError):
         return json.dumps({"erro": f"id invalido: {produto_id!r}"}, ensure_ascii=False)
+
+    # Production: the customer said "bonita em" after seeing the photo and the
+    # model called this tool again for the same product -> duplicate image.
+    if pid in _photo_ids_sent((state or {}).get("messages") or []):
+        logger.info("enviar_foto_produto id=%s already_sent", pid)
+        return json.dumps(
+            {"aviso": "a foto desse produto ja foi enviada nesta conversa; nao mande de "
+                      "novo, so siga a conversa"},
+            ensure_ascii=False,
+        )
 
     url = await _fresh_image_url(pid)
     if not url:
@@ -755,35 +768,51 @@ async def enviar_foto_produto(produto_id: str) -> str:
     # The webhook reads this ToolMessage at the end of the turn and sends the
     # image (it owns the raw phone; the graph only ever sees phone_hash).
     return json.dumps(
-        {"status": "foto sera enviada junto com a sua resposta", "url": url, "legenda": nome},
+        {"status": "foto sera enviada junto com a sua resposta", "url": url,
+         "legenda": nome, "produto_id": pid},
         ensure_ascii=False,
     )
 
 
-def photos_from_turn(messages: list[Any], limit: int = 3) -> list[dict[str, str]]:
-    """Photos queued by ``enviar_foto_produto`` since the last human message.
-
-    Deduplicated by URL and capped at ``limit`` (the prompt asks for at most
-    3; this is the hard backstop).
-    """
-    photos: list[dict[str, str]] = []
-    seen: set[str] = set()
-    tail: list[Any] = []
-    for m in reversed(messages or []):
-        if getattr(m, "type", None) == "human":
-            break
-        tail.append(m)
-    for m in reversed(tail):
+def _queued_photos(messages: list[Any]) -> list[dict[str, Any]]:
+    """Every successful ``enviar_foto_produto`` result in ``messages``, in order."""
+    out: list[dict[str, Any]] = []
+    for m in messages or []:
         if getattr(m, "type", None) != "tool" or getattr(m, "name", "") != FOTO_TOOL_NAME:
             continue
         try:
             data = json.loads(m.content if isinstance(m.content, str) else str(m.content))
         except (json.JSONDecodeError, TypeError):
             continue
-        url = data.get("url") if isinstance(data, dict) else None
-        if url and url not in seen:
-            seen.add(url)
-            photos.append({"url": url, "legenda": data.get("legenda") or ""})
+        if isinstance(data, dict) and data.get("url"):
+            out.append(data)
+    return out
+
+
+def _photo_ids_sent(messages: list[Any]) -> set[int]:
+    """Product ids whose photo already went out earlier in the conversation."""
+    return {d["produto_id"] for d in _queued_photos(messages) if d.get("produto_id") is not None}
+
+
+def photos_from_turn(messages: list[Any], limit: int = 3) -> list[dict[str, str]]:
+    """Photos queued by ``enviar_foto_produto`` since the last human message.
+
+    Deduplicated by product (Bling photo links are signed and can differ per
+    fetch, so the URL alone is not a stable key) and capped at ``limit`` (the
+    prompt asks for at most 3; this is the hard backstop).
+    """
+    tail: list[Any] = []
+    for m in reversed(messages or []):
+        if getattr(m, "type", None) == "human":
+            break
+        tail.append(m)
+    photos: list[dict[str, str]] = []
+    seen: set[Any] = set()
+    for data in _queued_photos(list(reversed(tail))):
+        key = data.get("produto_id") or data["url"]
+        if key not in seen:
+            seen.add(key)
+            photos.append({"url": data["url"], "legenda": data.get("legenda") or ""})
     return photos[:limit]
 
 

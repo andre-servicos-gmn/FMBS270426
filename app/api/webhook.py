@@ -16,6 +16,7 @@ from app.adapters.evolution import EvolutionClient
 from app.adapters.media_processor import identify_racket_image, transcribe_audio
 from app.agent.graph import build_graph
 from app.agent.message_splitter import parse_messages
+from app.agent.tools_v2 import photos_from_turn
 from app.agent.reset import (
     is_reset_authorized,
     is_reset_command,
@@ -909,8 +910,18 @@ async def _process_message(
     if not blocks:
         blocks = parse_messages(ai_response) or [ai_response]
 
+    evolution = EvolutionClient()
+    # Photos queued this turn by the V2 enviar_foto_produto tool go out BEFORE
+    # the text (the prompt tells the agent the photo arrives first). A failed
+    # photo never blocks the text answer.
+    for photo in photos_from_turn(result.get("messages") or []):
+        try:
+            await evolution.send_image(raw_phone, photo["url"], photo["legenda"])
+        except Exception as exc:
+            logger.error("evolution_send_image_failed phone_hash=%.8s: %s", phone_hash, exc)
+
     try:
-        await EvolutionClient().send_text_blocks(raw_phone, blocks)
+        await evolution.send_text_blocks(raw_phone, blocks)
     except Exception as exc:
         logger.error("evolution_send_failed phone_hash=%.8s: %s", phone_hash, exc)
 

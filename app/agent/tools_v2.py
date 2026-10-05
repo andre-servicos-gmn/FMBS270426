@@ -503,6 +503,13 @@ async def buscar_catalogo(
                 # Sprint 3.9 — bare category/racket browse (no price ask) →
                 # newest first, so the customer always sees the latest arrivals.
                 ranked = sorted(products, key=_created_at_key, reverse=True)[:_PRICE_RANGE_TOP_N]
+                # The newest arrivals skew expensive: production answered a
+                # beginner "temos raquetes de R$ 2.000 a R$ 3.600" off this
+                # slice when the floor is R$ 449. Keep the floor visible so the
+                # model situates the REAL range.
+                cheapest = products[0] if products else None
+                if cheapest is not None and cheapest not in ranked:
+                    ranked = ranked[: _PRICE_RANGE_TOP_N - 1] + [cheapest]
     elif q_tokens:
         scored = [(p, _score_product(q_tokens, p)) for p in products]
         scored = [(p, s) for p, s in scored if s > 0]
@@ -690,6 +697,96 @@ async def buscar_conhecimento(consulta: str) -> str:
     return json.dumps(out, ensure_ascii=False)
 
 
+FOTO_TOOL_NAME = "enviar_foto_produto"
+_CATALOG_PREFIX_RE = re.compile(r"(?i)^(raquete|bola)s?\s+(de\s+)?beach\s+tennis\s+")
+
+
+async def _fresh_image_url(pid: int) -> str | None:
+    """Product photo link fetched LIVE from Bling (external first, then the
+    Bling-hosted ones, whose links can expire — hence no caching). Falls back
+    to the mirrored ``imagem_url`` when Bling is unreachable."""
+    try:
+        from app.adapters.bling import BlingClient
+        from app.sync.bling_sync import _extract_first_image_link
+        resp = await BlingClient().consultar_produto(pid)
+        detail = resp.get("data") if isinstance(resp, dict) else None
+        link = _extract_first_image_link(detail or {}, kinds=("externas", "internas"))
+        if link:
+            return link
+    except Exception as exc:
+        logger.warning("enviar_foto_produto bling_failed id=%s: %s", pid, exc)
+    try:
+        from app.sync.bling_repo import fetch_product_by_id
+        product = await fetch_product_by_id(pid)
+        return (product or {}).get("imagem_url") or None
+    except Exception as exc:
+        logger.warning("enviar_foto_produto mirror_failed id=%s: %s", pid, exc)
+        return None
+
+
+@tool(FOTO_TOOL_NAME)
+async def enviar_foto_produto(produto_id: str) -> str:
+    """Envia ao cliente, pelo WhatsApp, a foto de um produto pelo id (o id vem do
+    buscar_catalogo). Use quando o cliente pedir foto, imagem ou quiser ver o produto,
+    ou quando ele demonstrar interesse em UM produto específico. Não mande foto de
+    lista inteira: no máximo 3 fotos por resposta. A foto chega ANTES do seu texto,
+    então não diga "segue abaixo". Se voltar erro, diga que não tem foto cadastrada
+    daquele produto."""
+    try:
+        pid = int(produto_id)
+    except (TypeError, ValueError):
+        return json.dumps({"erro": f"id invalido: {produto_id!r}"}, ensure_ascii=False)
+
+    url = await _fresh_image_url(pid)
+    if not url:
+        logger.info("enviar_foto_produto id=%s no_image", pid)
+        return json.dumps({"erro": "produto sem foto cadastrada"}, ensure_ascii=False)
+
+    nome = ""
+    try:
+        from app.sync.bling_repo import fetch_product_by_id
+        nome = ((await fetch_product_by_id(pid)) or {}).get("name") or ""
+    except Exception:  # noqa: BLE001 — the caption is optional
+        pass
+    # Caption reads like a person, not the catalog entry ("Drop Shot Pentax 3.0").
+    nome = _CATALOG_PREFIX_RE.sub("", nome).strip()
+
+    logger.info("enviar_foto_produto id=%s queued", pid)
+    # The webhook reads this ToolMessage at the end of the turn and sends the
+    # image (it owns the raw phone; the graph only ever sees phone_hash).
+    return json.dumps(
+        {"status": "foto sera enviada junto com a sua resposta", "url": url, "legenda": nome},
+        ensure_ascii=False,
+    )
+
+
+def photos_from_turn(messages: list[Any], limit: int = 3) -> list[dict[str, str]]:
+    """Photos queued by ``enviar_foto_produto`` since the last human message.
+
+    Deduplicated by URL and capped at ``limit`` (the prompt asks for at most
+    3; this is the hard backstop).
+    """
+    photos: list[dict[str, str]] = []
+    seen: set[str] = set()
+    tail: list[Any] = []
+    for m in reversed(messages or []):
+        if getattr(m, "type", None) == "human":
+            break
+        tail.append(m)
+    for m in reversed(tail):
+        if getattr(m, "type", None) != "tool" or getattr(m, "name", "") != FOTO_TOOL_NAME:
+            continue
+        try:
+            data = json.loads(m.content if isinstance(m.content, str) else str(m.content))
+        except (json.JSONDecodeError, TypeError):
+            continue
+        url = data.get("url") if isinstance(data, dict) else None
+        if url and url not in seen:
+            seen.add(url)
+            photos.append({"url": url, "legenda": data.get("legenda") or ""})
+    return photos[:limit]
+
+
 @tool
 async def escalar_humano(
     motivo: str, resumo: str, state: Annotated[dict, InjectedState]
@@ -728,4 +825,7 @@ async def escalar_humano(
     )
 
 
-TOOLS_V2 = [buscar_catalogo, detalhes_produto, consultar_estoque, buscar_conhecimento, escalar_humano]
+TOOLS_V2 = [
+    buscar_catalogo, detalhes_produto, consultar_estoque, buscar_conhecimento,
+    enviar_foto_produto, escalar_humano,
+]

@@ -401,12 +401,18 @@ def _extract_marca_nome(detail: dict[str, Any]) -> str | None:
     return None
 
 
-def _extract_first_image_link(detail: dict[str, Any]) -> str | None:
-    """Walk midia.imagens.externas defensively — never index a blind ``[0]``.
+def _extract_first_image_link(
+    detail: dict[str, Any], kinds: tuple[str, ...] = ("externas",)
+) -> str | None:
+    """Walk midia.imagens.<kind> defensively — never index a blind ``[0]``.
 
     Real Bling responses frequently have ``externas: []`` for products that
     don't have external images cadastrados, which used to raise IndexError
     in the original implementation.
+
+    ``kinds`` is tried in order. The sync mirrors only ``externas`` (stable
+    links); ``internas`` are Bling-hosted links that can expire, so only a
+    live caller (the photo tool, fetching at send time) asks for them.
     """
     if not isinstance(detail, dict):
         return None
@@ -416,13 +422,14 @@ def _extract_first_image_link(detail: dict[str, Any]) -> str | None:
     imagens = midia.get("imagens")
     if not isinstance(imagens, dict):
         return None
-    externas = imagens.get("externas")
-    if not isinstance(externas, list) or not externas:
-        return None
-    first = next((e for e in externas if isinstance(e, dict)), None)
-    if not first:
-        return None
-    return first.get("link") or first.get("url") or None
+    for kind in kinds:
+        entries = imagens.get(kind)
+        if not isinstance(entries, list):
+            continue
+        for e in entries:
+            if isinstance(e, dict) and (e.get("link") or e.get("url")):
+                return e.get("link") or e.get("url")
+    return None
 
 
 # ── Field extractor — Bling detail → bling_products row dict ────────────

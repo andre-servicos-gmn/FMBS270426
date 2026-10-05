@@ -51,7 +51,7 @@ from openai import AsyncOpenAI
 
 from app.adapters.model_params import adapt_chat_kwargs
 from app.agent.state_v2 import AgentStateV2
-from app.agent.tools_v2 import TOOLS_V2
+from app.agent.tools_v2 import TOOLS_V2, photos_from_turn
 from app.config import get_settings
 from app.security.pii_masker import is_clean, mask_pii
 
@@ -101,6 +101,16 @@ SYSTEM_SUPERVISOR_TEMPLATE = (
     "ferramenta e o cliente NÃO perguntou por ele, simplesmente não fale "
     "dele. Não anuncie \"não tenho informação sobre X\" sem ele ter "
     "perguntado.\n"
+    "FALE COMO VENDEDOR, NÃO COMO SISTEMA: nunca fale da sua fonte de "
+    "informação. Proibido \"o catálogo identifica\", \"não encontrei fichas "
+    "técnicas\", \"não tenho dados suficientes\", \"segundo o sistema\". "
+    "Quando o cliente pergunta se uma raquete é boa e você não tem a ficha "
+    "dela, responda com o que você sabe como vendedor: a linha (de entrada, "
+    "intermediária), o preço, a marca, e o que esse tipo de raquete costuma "
+    "entregar no jogo (busque em buscar_conhecimento). Ex.: \"É uma raquete de "
+    "entrada, boa pra quem está começando: costuma ser mais macia e perdoar "
+    "mais o erro.\" Se fizer sentido, ofereça mandar a foto ou ver ela na "
+    "loja.\n"
     "TRADUZA SPEC EM JOGO (regra de ouro ao descrever ou comparar raquete)\n"
     "Nunca jogue um termo técnico cru na cara do cliente. Toda vez que "
     "descrever ou comparar raquetes, LIDERE pelos três indicadores que mais "
@@ -179,6 +189,14 @@ SYSTEM_SUPERVISOR_TEMPLATE = (
     "disponível. É PROIBIDO responder sobre um produto DIFERENTE como se fosse o "
     "que o cliente pediu: se ele perguntou da raquete X, a resposta é sobre a X "
     "(mesmo que esgotada), nunca sobre a Y só porque a Y apareceu na busca.\n\n"
+    "FOTOS: você consegue mandar a foto de um produto com enviar_foto_produto "
+    "(usando o id do buscar_catalogo). Mande quando o cliente pedir foto ou "
+    "quiser ver o produto, ou quando ele mostrar interesse em UM produto "
+    "específico. Não mande foto de cada item de uma lista: no máximo 3 por "
+    "resposta. A foto chega ANTES do seu texto, então escreva como quem já "
+    "mandou (\"Essa é a Pentax 3.0, ...\"), nunca \"segue abaixo\". NUNCA "
+    "escreva o link da foto no texto. Se a ferramenta disser que o produto não "
+    "tem foto cadastrada, diga isso com naturalidade e ofereça ver na loja.\n\n"
     "O LIMITE DA CONSULTORIA (regra dura)\n"
     "Você nunca recomenda um produto específico baseado no perfil pessoal que o "
     "cliente contou (nível, corpo, lesão, estilo, objetivo). Esse salto, do "
@@ -320,6 +338,12 @@ SYSTEM_SUPERVISOR_TEMPLATE = (
     "estreite (\"Tenho bastante coisa; pra eu focar melhor, tem alguma marca de "
     "preferência, ou um valor que faz mais sentido pra você?\"). O \"mais\" é "
     "deixa pra virar consultoria, não pra listar tudo.\n"
+    "MANTENHA O ORÇAMENTO DA CONVERSA: se o cliente já disse que achou caro "
+    "ou pediu mais barata, todo \"mais opções\" depois disso fica NA MESMA "
+    "FAIXA (busque com preco_max perto do que você já mostrou, ou "
+    "ordenacao=\"preco_asc\"), sem repetir as que já mostrou. Nunca pule pra "
+    "raquete de R$ 2 mil chamando de \"mais em conta\". Se não houver mais "
+    "nada naquela faixa, diga isso com naturalidade.\n"
     "REAJA AO QUE MOSTRA (regra dura de formato): a ferramenta te devolve até 8 "
     "produtos, mas você NUNCA lista os 8. Mostre no MÁXIMO 3 — os mais em conta "
     "ou mais relevantes pro que o cliente pediu. Abra com uma frase curta que "
@@ -350,7 +374,11 @@ SYSTEM_SUPERVISOR_TEMPLATE = (
     "certa pro nível depende de avaliar o jogo da pessoa em quadra (não é só a "
     "etiqueta do produto), mostre opções REAIS que existem na faixa/categoria que "
     "ele citou (busque normalmente), e apresente a Consultoria como o jeito de "
-    "cravar a raquete certa pro nível dele. Nunca a negativa seca.\n"
+    "cravar a raquete certa pro nível dele (só se ainda não falou dela nesta "
+    "conversa). Nunca a negativa seca.\n"
+    "AO SITUAR PREÇO: só diga \"tenho de R$ X a R$ Y\" com o menor e o maior "
+    "preço que vieram na busca. Nunca dê a entender que a raquete mais barata "
+    "custa mais do que de fato custa.\n"
     "AO LISTAR produtos, uma linha por item, e não grude o comentário ou a "
     "pergunta na mesma linha do último produto."
 )
@@ -755,9 +783,55 @@ def _tool_result_has_items(content: str) -> bool:
     return False
 
 
+def _consultoria_mentions(messages: list[BaseMessage]) -> int:
+    """How many of the agent's final answers so far brought up the Consultoria."""
+    return sum(
+        1 for m in messages
+        if isinstance(m, AIMessage) and not getattr(m, "tool_calls", None)
+        and "consultoria" in (m.content if isinstance(m.content, str) else str(m.content)).lower()
+    )
+
+
+_BRAND_QUESTION_RE = re.compile(r"(?i)\bmarca\b[^.!?\n]*\?")
+
+
+def _brand_questions(messages: list[BaseMessage]) -> int:
+    """How many of the agent's final answers asked about brand preference."""
+    return sum(
+        1 for m in messages
+        if isinstance(m, AIMessage) and not getattr(m, "tool_calls", None)
+        and _BRAND_QUESTION_RE.search(m.content if isinstance(m.content, str) else str(m.content))
+    )
+
+
+def _conversation_note(messages: list[BaseMessage]) -> str:
+    """Per-turn context computed in code (the model loses count over long
+    threads). Appended AFTER the fixed prompt so its cached prefix holds."""
+    lines: list[str] = []
+    n = _consultoria_mentions(messages)
+    if n:
+        lines.append(
+            f"Você já falou da Consultoria {n} vez(es). NÃO ofereça de novo por "
+            "conta própria e não repita o preço. Só volte nela se o cliente "
+            "perguntar da Consultoria ou insistir pra você escolher a raquete "
+            "por ele, e aí em uma frase curta, com outras palavras (ex.: \"como "
+            "te falei, isso a gente crava na Consultoria\")."
+        )
+    if _brand_questions(messages):
+        lines.append(
+            "Você já perguntou a marca de preferência. NÃO pergunte de marca de "
+            "novo: siga com o que o cliente disse e termine com outra coisa útil "
+            "(oferecer a foto, contar mais de um modelo) ou sem pergunta."
+        )
+    if not lines:
+        return ""
+    return "\n\nCONTEXTO DESTA CONVERSA: " + " ".join(lines)
+
+
 def _build_openai_request(state: AgentStateV2, settings, *, force_search: bool) -> dict:
+    system = build_system_prompt(settings) + _conversation_note(list(state["messages"]))
     api_messages = _to_openai_messages(
-        [SystemMessage(content=build_system_prompt(settings))] + list(state["messages"])
+        [SystemMessage(content=system)] + list(state["messages"])
     )
     req: dict = {
         "model": settings.openai_model,
@@ -1060,7 +1134,11 @@ def sanitize_node(state: AgentStateV2) -> dict:
     if last_ai is None:
         return {}
     raw = last_ai.content if isinstance(last_ai.content, str) else str(last_ai.content)
-    cleaned = _sanitize_for_whatsapp(raw)
+    text = raw
+    # The photo already went out as an image; its raw link in the text is noise.
+    for photo in photos_from_turn(messages, limit=10):
+        text = text.replace(photo["url"], "")
+    cleaned = _sanitize_for_whatsapp(text)
     if _answered_before(messages, last_ai):
         cleaned = _strip_reintro(cleaned)
     if cleaned == raw:

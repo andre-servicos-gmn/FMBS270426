@@ -38,9 +38,6 @@ class EvolutionClient:
             phone: Destination number, digits only (e.g. "5511999999999").
             text:  Message body — must NOT contain raw PII.
         """
-        url = f"{self._base_url}/message/sendText/{self._instance}"
-        payload = {"number": phone, "text": text}
-
         # Pre-send structured log. We log destination + payload size only — the
         # API key lives in self._headers and is never serialized to a log line.
         logger.info(
@@ -49,11 +46,59 @@ class EvolutionClient:
             self._instance,
             len(text),
         )
+        await self._post_with_retry(
+            f"{self._base_url}/message/sendText/{self._instance}",
+            {"number": phone, "text": text},
+            "evolution_send_text",
+            phone,
+        )
 
+    async def send_image(self, phone: str, image_url: str, caption: str = "") -> None:
+        """Send an image by public URL (Evolution downloads it).
+
+        Args:
+            phone:     Destination number, digits only.
+            image_url: Public http(s) URL of the image.
+            caption:   Optional text shown under the image — must NOT contain PII.
+        """
+        path = image_url.split("?", 1)[0].lower()
+        mimetype = "image/png" if path.endswith(".png") else (
+            "image/webp" if path.endswith(".webp") else "image/jpeg"
+        )
+        logger.info(
+            "evolution_send_image begin phone=%.8s instance=%s caption_len=%d",
+            phone,
+            self._instance,
+            len(caption),
+        )
+        await self._post_with_retry(
+            f"{self._base_url}/message/sendMedia/{self._instance}",
+            {
+                "number": phone,
+                "mediatype": "image",
+                "mimetype": mimetype,
+                "media": image_url,
+                "caption": caption,
+                "fileName": "foto." + mimetype.split("/")[1],
+            },
+            "evolution_send_image",
+            phone,
+            timeout=30.0,
+        )
+
+    async def _post_with_retry(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        log_name: str,
+        phone: str,
+        timeout: float = 10.0,
+    ) -> None:
+        """POST with retry on 5xx/network errors (1 s → 2 s); 4xx re-raises."""
         last_exc: Exception | None = None
         for attempt in range(_MAX_RETRIES):
             try:
-                async with httpx.AsyncClient(timeout=10.0) as client:
+                async with httpx.AsyncClient(timeout=timeout) as client:
                     resp = await client.post(url, json=payload, headers=self._headers)
                     if resp.status_code >= 500:
                         raise httpx.HTTPStatusError(
@@ -63,7 +108,8 @@ class EvolutionClient:
                         )
                     resp.raise_for_status()
                     logger.info(
-                        "evolution_send_text phone=%.8s status=%d attempt=%d",
+                        "%s phone=%.8s status=%d attempt=%d",
+                        log_name,
                         phone,
                         resp.status_code,
                         attempt + 1,
@@ -80,7 +126,8 @@ class EvolutionClient:
             if attempt < _MAX_RETRIES - 1:
                 delay = _BASE_DELAY_S * (2**attempt)  # 1 s, 2 s
                 logger.warning(
-                    "evolution_send_text retry attempt=%d delay=%.1fs phone=%.8s err=%s",
+                    "%s retry attempt=%d delay=%.1fs phone=%.8s err=%s",
+                    log_name,
                     attempt + 1,
                     delay,
                     phone,
@@ -89,7 +136,8 @@ class EvolutionClient:
                 await asyncio.sleep(delay)
 
         logger.error(
-            "evolution_send_text failed after %d attempts phone=%.8s",
+            "%s failed after %d attempts phone=%.8s",
+            log_name,
             _MAX_RETRIES,
             phone,
         )

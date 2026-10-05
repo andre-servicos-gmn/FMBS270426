@@ -36,11 +36,15 @@ def _extract_saldo(payload: dict[str, Any], produto_id: int) -> int | None:
     items = payload.get("data") or []
     for item in items:
         if int(item.get("produto", {}).get("id", item.get("id") or 0)) == produto_id:
-            saldo = (
-                item.get("saldoFisicoTotal")
-                or item.get("saldoFisico")
-                or item.get("saldoVirtualTotal")
-                or item.get("saldoVirtual")
+            # First key PRESENT, not first truthy: an `or` chain turned a real
+            # saldo 0 into None ("não consegui confirmar" instead of esgotado).
+            saldo = next(
+                (
+                    item[k]
+                    for k in ("saldoFisicoTotal", "saldoFisico", "saldoVirtualTotal", "saldoVirtual")
+                    if item.get(k) is not None
+                ),
+                None,
             )
             if saldo is None:
                 continue

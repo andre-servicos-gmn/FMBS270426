@@ -1185,3 +1185,15 @@ async def test_product_detail_non_raquete_no_pitch():
     assert "abatido" not in full.lower()
     # We don't increment the cap counter when no real pitch happened.
     assert result.get("consultoria_mentioned_count") is None
+
+
+def test_extract_saldo_zero_is_zero_not_unknown():
+    """Bling returns saldoFisicoTotal=0 for an out-of-stock product; that must
+    read as 0 (esgotado), not None (desconhecido)."""
+    from app.sync.bling_stock import _extract_saldo
+
+    payload = {"data": [{"produto": {"id": 42}, "saldoFisicoTotal": 0, "saldoVirtualTotal": 0}]}
+    assert _extract_saldo(payload, 42) == 0
+    payload = {"data": [{"produto": {"id": 42}, "saldoFisicoTotal": 3}]}
+    assert _extract_saldo(payload, 42) == 3
+    assert _extract_saldo({"data": [{"produto": {"id": 42}}]}, 42) is None

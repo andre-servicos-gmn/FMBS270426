@@ -39,6 +39,7 @@ WhatsApp sanitization (Phase 2a):
     post-processing slot that Phase 2b's semantic fence will extend (the fence
     runs BEFORE sanitize).
 """
+import difflib
 import json
 import logging
 import re
@@ -67,6 +68,35 @@ SYSTEM_SUPERVISOR_TEMPLATE = (
     "Você é o Base, atendente da {store_name}, loja especializada em Beach "
     "Tennis e Padel. Você atende clientes pelo WhatsApp, em português, de forma "
     "direta e cordial, sem enrolação.\n\n"
+    "PERSONALIDADE (carioca de praia)\n"
+    "Você é carioca, vive na praia e joga beach tennis na areia quase todo "
+    "fim de tarde. Fala com a leveza de quem tá de chinelo e com a raquete "
+    "na mão: astral bom, simpático, sem pressa e sem formalidade. Trata o "
+    "cliente como alguém que você acabou de conhecer na quadra.\n"
+    "Esse jeito aparece em TODA mensagem, no ritmo e na escolha das "
+    "palavras: frases curtas e soltas, abrindo com \"Boa!\", \"Show!\", "
+    "\"Fala!\", \"Opa!\", e usando \"suave\", \"tranquilo\", \"de boa\", "
+    "\"maneiro\", \"irado\", \"partiu\", \"tamo junto\", \"valeu\". Uma ou "
+    "duas dessas por mensagem, variando, nunca a mesma em toda resposta. "
+    "Nunca abra duas respostas seguidas com a mesma palavra, e em notícia "
+    "ruim (sem estoque, não tem) não abra com \"Boa!\" nem \"Show!\". "
+    "\"Tamo junto\" e emoji NÃO são fecho de mensagem: guarde pra despedida "
+    "de verdade. Em "
+    "vez de \"É uma raquete de entrada, mais fácil de manejar\", algo como "
+    "\"Essa é de entrada, bem suave de jogar, perdoa o erro enquanto você "
+    "pega o jeito\". Nada de sotaque escrito ou caricatura (\"mermão\", "
+    "\"rapá\", \"caraca\" toda hora, letras trocadas), nem gíria que possa "
+    "soar grosseira.\n"
+    "Puxe a praia e o beach tennis como quem joga de verdade, mais ou menos "
+    "a cada duas ou três mensagens: o vento da tarde, a areia fofa, aquele "
+    "smash, o sol na cara, a resenha depois do jogo (ex.: \"essa aí é leve, "
+    "aguenta um fim de tarde inteiro na areia\", \"com essa o smash sai "
+    "pesado\"). Sempre junto da informação, nunca no lugar dela.\n"
+    "Leia o cliente: se ele escreve mais formal ou está com pressa, segure "
+    "as gírias e seja só simpático e direto. Preço, estoque, endereço e as "
+    "regras abaixo vêm sempre claros, o tom carioca é só o jeito de falar.\n"
+    "Emoji: no máximo um, de vez em quando (🏖️, 🎾, 🤙), nunca em toda "
+    "mensagem.\n\n"
     "PRIMEIRA MENSAGEM (saudação)\n"
     "Na PRIMEIRA mensagem da conversa (não há histórico anterior do cliente), "
     "apresente-se de forma breve e natural, usando a assinatura 'Sou o "
@@ -75,8 +105,8 @@ SYSTEM_SUPERVISOR_TEMPLATE = (
     "uma segunda resposta colada depois.\n"
     "Se ele só cumprimentou ('oi', 'fala, tudo bem?'), devolva o cumprimento "
     "PRIMEIRO e emende a apresentação com um convite curto. Ex.: 'Fala! Tudo "
-    "certo por aqui. Sou o assistente Base, da {store_name}. O que você tá "
-    "procurando hoje?'\n"
+    "tranquilo por aqui. Sou o assistente Base, da {store_name}. Tá "
+    "procurando o quê hoje?'\n"
     "Se ele já chegou perguntando algo, apresente-se em uma frase curta e vá "
     "direto responder a pergunta.\n"
     "Termine com no máximo UMA pergunta. É PROIBIDO responder o cumprimento "
@@ -201,7 +231,9 @@ SYSTEM_SUPERVISOR_TEMPLATE = (
     "seu texto, então escreva como quem já "
     "mandou (\"Essa é a Pentax 3.0, ...\"), nunca \"segue abaixo\". NUNCA "
     "escreva o link da foto no texto. Se a ferramenta disser que o produto não "
-    "tem foto cadastrada, diga isso com naturalidade e ofereça ver na loja.\n\n"
+    "tem foto: se o CLIENTE pediu a foto, diga com naturalidade e ofereça ver "
+    "na loja. Se foi você que quis mandar por conta própria, não comente "
+    "nada, só siga a resposta.\n\n"
     "O LIMITE DA CONSULTORIA (regra dura)\n"
     "Você nunca recomenda um produto específico baseado no perfil pessoal que o "
     "cliente contou (nível, corpo, lesão, estilo, objetivo). Esse salto, do "
@@ -271,7 +303,8 @@ SYSTEM_SUPERVISOR_TEMPLATE = (
     "ou vírgula.\n"
     "VOCÊ É GENTE DA LOJA: você é o atendente da Base Sports, alguém que JOGA "
     "e entende de raquete, não um robô nem uma central de atendimento. Fala "
-    "simples, direto e na primeira pessoa, com o jeito de quem é do esporte. "
+    "simples, direto e na primeira pessoa, com o jeito carioca de quem é do "
+    "esporte (veja PERSONALIDADE). "
     "Nada de 'prezado cliente', 'segue abaixo', 'conforme solicitado', "
     "'permaneço à disposição' nem fórmula corporativa. Nunca se apresente como "
     "IA, inteligência artificial, assistente virtual, bot ou robô, e não peça "
@@ -798,6 +831,24 @@ def _consultoria_mentions(messages: list[BaseMessage]) -> int:
 
 
 _BRAND_QUESTION_RE = re.compile(r"(?i)\bmarca\b[^.!?\n]*\?")
+# Interjection that opened an answer ("Boa!", "Show,", "Fala!"). Only short
+# exclamations count; a sentence that starts with a product name does not.
+_OPENER_RE = re.compile(r"^\s*([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+)?)\s*[!,]")
+
+
+def _final_answers(messages: list[BaseMessage]) -> list[str]:
+    """The agent's final answers (no tool calls) so far, oldest first."""
+    return [
+        m.content if isinstance(m.content, str) else str(m.content)
+        for m in messages
+        if isinstance(m, AIMessage) and not getattr(m, "tool_calls", None)
+        and (m.content or "")
+    ]
+
+
+def _opener(answer: str) -> str | None:
+    m = _OPENER_RE.match(answer)
+    return m.group(1).capitalize() if m else None
 
 
 def _brand_questions(messages: list[BaseMessage]) -> int:
@@ -828,6 +879,15 @@ def _conversation_note(messages: list[BaseMessage]) -> str:
             "novo: siga com o que o cliente disse e termine com outra coisa útil "
             "(oferecer a foto, contar mais de um modelo) ou sem pergunta."
         )
+    answers = _final_answers(messages)
+    openers = sorted({w for w in (_opener(a) for a in answers[-2:]) if w})
+    if openers:
+        lines.append(
+            "Suas últimas respostas abriram com: " + ", ".join(f"\"{w}\"" for w in openers)
+            + ". Abra esta de outro jeito (ou vá direto ao assunto)."
+        )
+    if any("tamo junto" in a.lower() for a in answers):
+        lines.append("Você já usou \"tamo junto\" nesta conversa: não use de novo.")
     if not lines:
         return ""
     return "\n\nCONTEXTO DESTA CONVERSA: " + " ".join(lines)
@@ -1045,6 +1105,29 @@ _CANNED_CLOSING_RE = re.compile(
 )
 
 
+def _drop_repeated_lines(lines: list[str]) -> list[str]:
+    """Drop a line that nearly repeats the previous non-empty one.
+
+    gpt-6-luna occasionally emits the same sentence twice with tiny wording
+    changes ("Poxa, foi mal pela demora! ... me conta como posso te ajudar?"
+    then "... Como posso te ajudar?"). Short lines (list items like
+    "Pentax 3.0, R$ 449") are never compared, so similar products survive.
+    """
+    kept: list[str] = []
+    last = ""
+    for ln in lines:
+        norm = re.sub(r"[^\w]+", " ", ln.lower()).strip()
+        if (
+            len(norm) >= 40 and last
+            and difflib.SequenceMatcher(None, last, norm).ratio() >= 0.85
+        ):
+            continue
+        kept.append(ln)
+        if norm:
+            last = norm
+    return kept
+
+
 def _sanitize_for_whatsapp(text: str) -> str:
     """Deterministic cleanup of the final answer before it leaves the graph.
 
@@ -1086,7 +1169,7 @@ def _sanitize_for_whatsapp(text: str) -> str:
 
     # 4) drop lines that are pure JSON/array dumps
     kept_lines = [ln for ln in out.splitlines() if not _JSON_LINE_RE.match(ln)]
-    out = "\n".join(kept_lines)
+    out = "\n".join(_drop_repeated_lines(kept_lines))
 
     # 4b) strip a TRAILING canned closing offer ("se precisar… é só avisar",
     #     "estou à disposição", …). Only at the end, run twice in case the model

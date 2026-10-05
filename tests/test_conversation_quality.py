@@ -45,7 +45,7 @@ async def test_browse_keeps_cheapest_racket_visible():
 
 def test_no_note_before_consultoria_is_mentioned():
     msgs = [HumanMessage(content="oi"), AIMessage(content="Oi! O que você procura?")]
-    assert _conversation_note(msgs) == ""
+    assert "Consultoria" not in _conversation_note(msgs)
 
 
 def test_note_after_consultoria_pitch():
@@ -91,3 +91,42 @@ def test_note_after_brand_question():
 def test_brand_mention_without_question_is_not_counted():
     msgs = [AIMessage(content="A marca Drop Shot tem ótimas opções de entrada.")]
     assert _conversation_note(msgs) == ""
+
+
+# ── Carioca persona tics (2026-10-05) ────────────────────────────────────────
+
+def test_note_names_recent_openers():
+    msgs = [
+        HumanMessage(content="oi"), AIMessage(content="Boa! Tenho opções de R$ 449 a R$ 1.499."),
+        HumanMessage(content="e drop shot?"), AIMessage(content="Show, da Drop Shot tenho três."),
+        HumanMessage(content="a primeira é boa?"),
+    ]
+    note = _conversation_note(msgs)
+    assert "\"Boa\"" in note and "\"Show\"" in note
+
+
+def test_product_sentence_is_not_an_opener():
+    msgs = [AIMessage(content="A Kronos custa R$ 1.190, e a Proteo R$ 1.390.")]
+    assert _conversation_note(msgs) == ""
+
+
+def test_note_blocks_repeating_tamo_junto():
+    msgs = [AIMessage(content="Fica na Estrada do Engenho d'Água, 1200. Tamo junto!")]
+    assert "não use de novo" in _conversation_note(msgs)
+
+
+def test_sanitize_drops_near_duplicate_sentence():
+    from app.agent.supervisor import _sanitize_for_whatsapp
+
+    text = (
+        "Poxa, foi mal pela demora! Sou o assistente Base, da Base Sports. Tô por aqui agora, me conta como posso te ajudar?\n"
+        "Poxa, foi mal pela demora! Sou o assistente Base, da Base Sports. Tô por aqui agora. Como posso te ajudar?"
+    )
+    assert _sanitize_for_whatsapp(text).count("Poxa") == 1
+
+
+def test_sanitize_keeps_similar_short_list_items():
+    from app.agent.supervisor import _sanitize_for_whatsapp
+
+    text = "Drop Shot Pentax 3.0, R$ 449\nDrop Shot Pentax 4.0, R$ 549\nDrop Shot Tiger 2.0, R$ 469"
+    assert _sanitize_for_whatsapp(text) == text

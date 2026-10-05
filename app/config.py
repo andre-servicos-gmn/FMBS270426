@@ -16,7 +16,7 @@ class Settings(BaseSettings):
 
     # OpenAI
     openai_api_key: str = Field(default="")
-    openai_model: str = Field(default="gpt-4o-mini")
+    openai_model: str = Field(default="gpt-6-luna")
 
     # Evolution API
     evolution_api_url: str = Field(default="")

@@ -65,7 +65,7 @@ Generate every secret with `openssl rand -hex 32` unless noted.
 ```
 # OpenAI
 OPENAI_API_KEY=
-OPENAI_MODEL=gpt-4o-mini
+OPENAI_MODEL=gpt-6-luna
 
 # Evolution
 EVOLUTION_API_URL=https://<evolution-host>/

@@ -32,7 +32,7 @@ Este é um projeto da **Nouvaris**. Os padrões de código, segurança e estrutu
 
 ## Modelos OpenAI em uso
 
-- **Chat (triage, diagnose, recommend, faq, smalltalk, close):** `gpt-4o-mini`
+- **Chat (supervisor V2 + fence; legado triage/recommend/faq/close):** `gpt-6-luna` (via `OPENAI_MODEL`; com tools no Chat Completions exige `reasoning_effort="none"`, aplicado em `app/adapters/model_params.py`)
 - **Embeddings (catálogo + knowledge base):** `text-embedding-3-small` (1536d)
 - **Transcrição de áudio (futuro Sprint 2):** `whisper-1`
 - **Análise de imagem (futuro Sprint 2):** `gpt-4o` com input vision
@@ -106,7 +106,7 @@ beachtenis-agent/
 ```
 # OpenAI
 OPENAI_API_KEY=
-OPENAI_MODEL=gpt-4o-mini
+OPENAI_MODEL=gpt-6-luna
 
 # Evolution API
 EVOLUTION_API_URL=

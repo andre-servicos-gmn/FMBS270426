@@ -261,6 +261,19 @@ _BEACH_TENNIS_ALIASES = {
 }
 
 
+# Product-type words that are NOT a racket. "bola de beach tennis" is a ball FOR
+# the sport: the model passes categoria="beach tennis", and the racket-only
+# curated flag would hide every ball/bag/grip ("não temos bola" — seen in the
+# gpt-6-luna replay and reproduced on gpt-4o-mini). When the query names one of
+# these, "beach tennis" is the sport qualifier, not the product type.
+_NON_RACKET_PRODUCT_TOKENS = {
+    "bola", "bolas", "mochila", "mochilas", "raqueteira", "raqueteiras",
+    "bolsa", "bolsas", "grip", "grips", "overgrip", "overgrips", "oculos",
+    "bone", "bones", "viseira", "viseiras", "munhequeira", "munhequeiras",
+    "antivibrador", "antivibradores", "camiseta", "camisetas", "capa", "capas",
+}
+
+
 def _wants_beach_tennis(categoria: str | None) -> bool:
     if not categoria:
         return False
@@ -359,6 +372,9 @@ async def buscar_catalogo(
     não há produto numa faixa de preço."""
     q_tokens = _content_tokens(consulta)
     raw_tokens = set(_tokens(consulta))
+    if _wants_beach_tennis(categoria) and raw_tokens & _NON_RACKET_PRODUCT_TOKENS:
+        # "bola de beach tennis": sport qualifier, not the racket category.
+        categoria = None
     wants_racket = bool(raw_tokens & _RACKET_HINT_TOKENS)
     has_price_filter = preco_min is not None or preco_max is not None
     has_category = bool(categoria and categoria.strip())

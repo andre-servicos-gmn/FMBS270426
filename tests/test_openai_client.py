@@ -297,13 +297,31 @@ class TestJSONMode:
         kwargs = raw_client.chat.completions.create.call_args.kwargs
         assert "response_format" not in kwargs
 
+    @staticmethod
+    def _pin_model(monkeypatch: pytest.MonkeyPatch, model: str) -> None:
+        from app.config import get_settings
+
+        pinned = get_settings().model_copy(update={"openai_model": model})
+        monkeypatch.setattr("app.adapters.openai_client.get_settings", lambda: pinned)
+
     async def test_max_tokens_and_temperature_forwarded(
-        self, client: OpenAIClient, raw_client: AsyncMock
+        self, client: OpenAIClient, raw_client: AsyncMock, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        self._pin_model(monkeypatch, "gpt-4o-mini")
         await client.chat(messages=[], system="sistema", max_tokens=512, temperature=0.1)
         kwargs = raw_client.chat.completions.create.call_args.kwargs
         assert kwargs["max_tokens"] == 512
         assert kwargs["temperature"] == 0.1
+
+    async def test_gpt6_request_shape(
+        self, client: OpenAIClient, raw_client: AsyncMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._pin_model(monkeypatch, "gpt-6-luna")
+        await client.chat(messages=[], system="sistema", max_tokens=512, temperature=0.1)
+        kwargs = raw_client.chat.completions.create.call_args.kwargs
+        assert kwargs["model"] == "gpt-6-luna"
+        assert "max_tokens" not in kwargs and "temperature" not in kwargs
+        assert kwargs["max_completion_tokens"] >= 512
 
 
 # ---------------------------------------------------------------------------
